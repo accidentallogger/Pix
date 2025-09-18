@@ -1,4 +1,4 @@
-## PixelForge - Minimal Pixel Editor
+## Pix
 
 A lightweight, SDL2-based pixel art editor designed for creating sprites and small animations. Perfect for game developers and digital artists.
 
