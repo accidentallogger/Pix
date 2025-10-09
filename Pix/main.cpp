@@ -25,8 +25,8 @@
 #include <iostream>
 #include "stb_image_write.h"
 
-#include <SDL.h>
-#include <SDL_ttf.h>
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 
 using namespace std::chrono;
 
