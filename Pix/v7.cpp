@@ -527,7 +527,7 @@ int main()
     Canvas canvas(initW, initH);
 
     // Window & view setup
-    sf::RenderWindow window(sf::VideoMode(1100, 700), "PIXEL8 - 8-Bit Pixel Editor", sf::Style::Close | sf::Style::Titlebar);
+    sf::RenderWindow window(sf::VideoMode(1100, 700), "Pix", sf::Style::Close | sf::Style::Titlebar);
     window.setVerticalSyncEnabled(true);
 
     // Load a retro-style font
