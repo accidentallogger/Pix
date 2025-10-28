@@ -64,12 +64,126 @@ namespace EightBitColors
 }
 
 // Simple GIF encoder (minimal implementation)
+// Fixed GIF encoder implementation
 class SimpleGIFEncoder
 {
 private:
     std::ofstream file;
     int width, height;
     int delay; // in hundredths of a second
+
+    void writeLZWData(const std::vector<u8> &imageData)
+    {
+        // Simple LZW compression implementation
+        std::vector<u8> output;
+
+        // LZW minimum code size
+        u8 minCodeSize = 8;
+        output.push_back(minCodeSize);
+
+        // For simplicity, we'll use basic encoding
+        std::vector<int> codes;
+
+        // Initialize dictionary
+        std::vector<std::vector<u8>> dictionary;
+        for (int i = 0; i < 256; i++)
+        {
+            dictionary.push_back({(u8)i});
+        }
+
+        std::vector<u8> current;
+        for (u8 pixel : imageData)
+        {
+            std::vector<u8> next = current;
+            next.push_back(pixel);
+
+            bool found = false;
+            for (size_t i = 0; i < dictionary.size(); i++)
+            {
+                if (dictionary[i] == next)
+                {
+                    found = true;
+                    current = next;
+                    break;
+                }
+            }
+
+            if (!found)
+            {
+                // Add current to codes
+                for (size_t i = 0; i < dictionary.size(); i++)
+                {
+                    if (dictionary[i] == current)
+                    {
+                        codes.push_back(i);
+                        break;
+                    }
+                }
+
+                // Add new sequence to dictionary
+                dictionary.push_back(next);
+                current = {pixel};
+            }
+        }
+
+        // Add last code
+        for (size_t i = 0; i < dictionary.size(); i++)
+        {
+            if (dictionary[i] == current)
+            {
+                codes.push_back(i);
+                break;
+            }
+        }
+
+        // End of information code
+        codes.push_back(256);
+
+        // Convert codes to bit stream (simplified)
+        std::vector<u8> compressed;
+        int currentByte = 0;
+        int bitCount = 0;
+        int codeSize = minCodeSize + 1;
+
+        for (int code : codes)
+        {
+            for (int i = 0; i < codeSize; i++)
+            {
+                currentByte |= ((code >> i) & 1) << bitCount;
+                bitCount++;
+                if (bitCount == 8)
+                {
+                    compressed.push_back(currentByte);
+                    currentByte = 0;
+                    bitCount = 0;
+                }
+            }
+        }
+
+        if (bitCount > 0)
+        {
+            compressed.push_back(currentByte);
+        }
+
+        // Write compressed data in sub-blocks
+        size_t pos = 0;
+        while (pos < compressed.size())
+        {
+            u8 blockSize = (u8)std::min((size_t)255, compressed.size() - pos);
+            output.push_back(blockSize);
+            for (int i = 0; i < blockSize; i++)
+            {
+                output.push_back(compressed[pos++]);
+            }
+        }
+        output.push_back(0); // Block terminator
+
+        // Write all data blocks
+        for (u8 byte : output)
+        {
+            file.put(byte);
+        }
+    }
 
 public:
     SimpleGIFEncoder(const std::string &filename, int w, int h, int frameDelay = 5)
@@ -91,7 +205,7 @@ public:
         file.put(0x00); // Background color index
         file.put(0x00); // Pixel aspect ratio
 
-        // Write Global Color Table (simplified - using 8-bit palette)
+        // Write Global Color Table (using 8-bit palette)
         for (int i = 0; i < 16; ++i)
         {
             file.put(EightBitColors::Palette[i].r);
@@ -154,11 +268,8 @@ public:
         file.put((height >> 8) & 0xFF);
         file.put(0x00); // No local color table, not interlaced
 
-        // Write image data (simplified - using LZW compression would be better)
-        // For simplicity, we'll use uncompressed data
-        file.put(0x08); // LZW minimum code size
-        file.put(0xFF); // First data sub-block size
-
+        // Convert image to indexed color
+        std::vector<u8> indexedData;
         for (int y = 0; y < height; ++y)
         {
             for (int x = 0; x < width; ++x)
@@ -166,7 +277,7 @@ public:
                 sf::Color pixel = image.getPixel(x, y);
                 if (pixel.a == 0)
                 {
-                    file.put(0); // Transparent -> black
+                    indexedData.push_back(0); // Transparent -> black
                 }
                 else
                 {
@@ -185,16 +296,17 @@ public:
                             bestIndex = i;
                         }
                     }
-                    file.put(bestIndex);
+                    indexedData.push_back(bestIndex);
                 }
             }
         }
 
-        file.put(0x00); // Block terminator
+        // Write LZW compressed image data
+        writeLZWData(indexedData);
+
         return true;
     }
 };
-
 struct Frame
 {
     std::string name = "Frame";
@@ -313,7 +425,7 @@ public:
     bool showGrid = true;
     bool onionSkin = false;
     int eraserSize = 1; // New: Eraser size management
-
+    std::string currentFilename;
     Canvas(unsigned w = 64, unsigned h = 64) : width(w), height(h)
     {
         // Add bounds checking
@@ -324,6 +436,21 @@ public:
             height = 64;
         }
         frames.emplace_back(width, height, "Frame 0");
+    }
+
+    bool saveProject()
+    {
+        if (currentFilename.empty())
+        {
+            return saveToPix("project.pix");
+        }
+        return saveToPix(currentFilename);
+    }
+
+    // NEW: Save project as (new filename)
+    bool saveProjectAs(const std::string &filename)
+    {
+        return saveToPix(filename);
     }
 
     void resizeCanvas(unsigned newWidth, unsigned newHeight)
@@ -374,9 +501,9 @@ public:
         currentFrame = 0;
         zoom = 8.0f;
         pan = {0, 0};
-        eraserSize = 1; // Reset eraser size
+        eraserSize = 1;       // Reset eraser size
+        currentFilename = ""; // NEW: Reset filename
     }
-
     void addFrame()
     {
         // Limit maximum frames to prevent memory issues
@@ -526,30 +653,64 @@ public:
         f.updateThumbnail();
     }
 
-    // NEW: Export as GIF
-    bool exportAsGIF(const std::string &filename, int frameDelay = 5) const
+    bool exportAsGIF(const std::string &filename, int frameDelay = 5, int scaleFactor = 1) const
     {
         if (frames.empty())
             return false;
 
         try
         {
-            SimpleGIFEncoder gif(filename, width, height, frameDelay);
+            // Create directory if it doesn't exist
+            std::string dir = filename.substr(0, filename.find_last_of("/\\"));
+            if (!dir.empty() && !createDirectory(dir))
+            {
+                std::cerr << "Failed to create directory: " << dir << std::endl;
+            }
+
+            // Calculate scaled dimensions
+            int scaledWidth = width * scaleFactor;
+            int scaledHeight = height * scaleFactor;
+
+            SimpleGIFEncoder gif(filename, scaledWidth, scaledHeight, frameDelay);
             for (const auto &frame : frames)
             {
-                if (!gif.addFrame(frame.image))
+                // Create scaled version of the frame
+                sf::Image scaledImage;
+                scaledImage.create(scaledWidth, scaledHeight, sf::Color(0, 0, 0, 0));
+
+                // Scale the image using nearest-neighbor for pixel art
+                for (int y = 0; y < scaledHeight; ++y)
                 {
+                    for (int x = 0; x < scaledWidth; ++x)
+                    {
+                        int srcX = x / scaleFactor;
+                        int srcY = y / scaleFactor;
+                        if (srcX < (int)width && srcY < (int)height)
+                        {
+                            scaledImage.setPixel(x, y, frame.image.getPixel(srcX, srcY));
+                        }
+                    }
+                }
+
+                if (!gif.addFrame(scaledImage))
+                {
+                    std::cerr << "Failed to add frame to GIF" << std::endl;
                     return false;
                 }
             }
             return true;
         }
+        catch (const std::exception &e)
+        {
+            std::cerr << "GIF export error: " << e.what() << std::endl;
+            return false;
+        }
         catch (...)
         {
+            std::cerr << "Unknown GIF export error" << std::endl;
             return false;
         }
     }
-
     // NEW: Create directory function (cross-platform)
     bool createDirectory(const std::string &path) const
     {
@@ -720,42 +881,82 @@ private:
 
 public:
     // Save and load .pix custom format
-    bool saveToPix(const std::string &filename) const
+    bool saveToPix(const std::string &filename)
     {
         std::ofstream ofs(filename, std::ios::binary);
         if (!ofs)
             return false;
+
+        // Write header
         ofs.write("PIX1", 4); // magic
+
         auto write32 = [&](u32 v)
-        { ofs.write((char *)&v, 4); };
+        {
+            char bytes[4];
+            bytes[0] = (v >> 0) & 0xFF;
+            bytes[1] = (v >> 8) & 0xFF;
+            bytes[2] = (v >> 16) & 0xFF;
+            bytes[3] = (v >> 24) & 0xFF;
+            ofs.write(bytes, 4);
+        };
+
         write32(width);
         write32(height);
         write32((u32)frames.size());
+
         for (const Frame &f : frames)
         {
+            // Write frame name
             u32 nameLen = (u32)f.name.size();
             write32(nameLen);
             ofs.write(f.name.c_str(), nameLen);
-            // raw pixels RGBA
+
+            // Write frame pixels (RGBA)
             const sf::Image &img = f.image;
-            const sf::Uint8 *ptr = img.getPixelsPtr();
-            u32 total = width * height * 4;
-            ofs.write((char *)ptr, total);
+            auto size = img.getSize();
+
+            // Convert pixels to byte array
+            std::vector<sf::Uint8> pixels(size.x * size.y * 4);
+            for (unsigned y = 0; y < size.y; ++y)
+            {
+                for (unsigned x = 0; x < size.x; ++x)
+                {
+                    sf::Color pixel = img.getPixel(x, y);
+                    unsigned index = (y * size.x + x) * 4;
+                    pixels[index] = pixel.r;
+                    pixels[index + 1] = pixel.g;
+                    pixels[index + 2] = pixel.b;
+                    pixels[index + 3] = pixel.a;
+                }
+            }
+
+            ofs.write((char *)pixels.data(), pixels.size());
         }
+
+        currentFilename = filename; // NEW: Update current filename
         return true;
     }
-
     bool loadFromPix(const std::string &filename)
     {
         std::ifstream ifs(filename, std::ios::binary);
         if (!ifs)
             return false;
+
+        // Read and verify magic
         char magic[5] = {0};
         ifs.read(magic, 4);
         if (std::string(magic) != "PIX1")
             return false;
+
         auto read32 = [&]() -> u32
-        { u32 v; ifs.read((char*)&v,4); return v; };
+        {
+            char bytes[4];
+            ifs.read(bytes, 4);
+            if (ifs.gcount() != 4)
+                return 0;
+            return (u32)((bytes[0] << 0) | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
+        };
+
         u32 w = read32(), h = read32();
         u32 fcount = read32();
 
@@ -769,6 +970,7 @@ public:
         frames.clear();
         width = w;
         height = h;
+
         for (u32 fi = 0; fi < fcount; ++fi)
         {
             u32 nameLen = read32();
@@ -777,21 +979,33 @@ public:
                 std::cerr << "Invalid frame name length!" << std::endl;
                 return false;
             }
+
             std::string name(nameLen, '\0');
             ifs.read(&name[0], nameLen);
+
             Frame f(width, height, name);
-            u32 total = width * height * 4;
-            std::vector<sf::Uint8> buf(total);
-            ifs.read((char *)buf.data(), total);
-            f.image.create(width, height, buf.data());
+
+            // Read pixel data
+            std::vector<sf::Uint8> pixels(width * height * 4);
+            ifs.read((char *)pixels.data(), pixels.size());
+
+            if (ifs.gcount() != (std::streamsize)pixels.size())
+            {
+                std::cerr << "Failed to read pixel data for frame " << fi << std::endl;
+                return false;
+            }
+
+            // Create image from pixel data
+            f.image.create(width, height, pixels.data());
             f.updateThumbnail();
             frames.push_back(std::move(f));
         }
+
         currentFrame = 0;
-        eraserSize = 1; // Reset eraser size
+        eraserSize = 1;             // Reset eraser size
+        currentFilename = filename; // NEW: Update current filename
         return true;
     }
-
     // Export current frame or all frames as PNGs
     bool exportCurrentFramePNG(const std::string &filename) const
     {
@@ -995,6 +1209,16 @@ void drawPanel(sf::RenderWindow &w, const sf::FloatRect &rect, const std::string
 
 int main()
 {
+    // NEW: GIF export variables
+    std::string gifSizeStr = "1"; // Default scale factor
+
+    bool gifSizeInputActive = false;
+    bool gifDelayInputActive = false;
+    int gifSize = 1; // Current scale factor
+    bool showSaveDialog = false;
+    bool showOpenDialog = false;
+    std::string saveFilename = "project.pix";
+    std::string openFilename = "project.pix";
     // Basic parameters with error handling
     unsigned initW = 64, initH = 64;
     Canvas canvas(initW, initH);
@@ -1126,6 +1350,7 @@ int main()
                     if (ev.mouseButton.button == sf::Mouse::Middle)
                         middleMouseDown = false;
                 }
+
                 else if (ev.type == sf::Event::KeyPressed)
                 {
                     bool ctrl = ev.key.control;
@@ -1265,29 +1490,39 @@ int main()
                         }
                         else if (showGIFExportDialog)
                         {
-                            // Export GIF when Enter is pressed
+                            if (ev.text.unicode == '\b') // Backspace
+                            {
+                                if (gifSizeInputActive && !gifSizeStr.empty())
+                                    gifSizeStr.pop_back();
+                                else if (gifDelayInputActive && !gifDelayStr.empty())
+                                    gifDelayStr.pop_back();
+                            }
+                            else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
+                            {
+                                if (gifSizeInputActive)
+                                {
+                                    if (gifSizeStr.length() < 2) // Limit to 2 digits
+                                        gifSizeStr += static_cast<char>(ev.text.unicode);
+                                }
+                                else if (gifDelayInputActive)
+                                {
+                                    if (gifDelayStr.length() < 3)
+                                        gifDelayStr += static_cast<char>(ev.text.unicode);
+                                }
+                            }
+
+                            // Update the current size value for real-time preview
                             try
                             {
-                                int delay = std::stoi(gifDelayStr);
-                                if (delay > 0 && delay <= 100)
-                                {
-                                    if (canvas.exportAsGIF("export/animation.gif", delay))
-                                    {
-                                        exportStatus = "Exported GIF: export/animation.gif";
-                                        exportStatusTimer = 3.0f;
-                                        showGIFExportDialog = false;
-                                    }
-                                    else
-                                    {
-                                        exportStatus = "Failed to export GIF";
-                                        exportStatusTimer = 3.0f;
-                                    }
-                                }
+                                gifSize = std::stoi(gifSizeStr);
+                                if (gifSize < 1)
+                                    gifSize = 1;
+                                if (gifSize > 10)
+                                    gifSize = 10;
                             }
                             catch (...)
                             {
-                                exportStatus = "Invalid GIF delay value";
-                                exportStatusTimer = 3.0f;
+                                gifSize = 1;
                             }
                         }
                     }
@@ -1321,9 +1556,64 @@ int main()
                             // Cancel Godot export dialog
                             showGodotExportDialog = false;
                         }
+                        else if (showSaveDialog)
+                        {
+                            showSaveDialog = false;
+                        }
+                        else if (showOpenDialog)
+                        {
+                            showOpenDialog = false;
+                        }
                         else if (colorPicker.isOpen)
                         {
                             colorPicker.isOpen = false;
+                        }
+                    }
+                    else if (ctrl && ev.key.code == sf::Keyboard::O)
+                    {
+                        // NEW: Open project
+                        showOpenDialog = true;
+                        openFilename = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                    }
+                    else if (ctrl && ev.key.code == sf::Keyboard::S)
+                    {
+                        // NEW: Save project (with current filename or show dialog)
+                        if (canvas.currentFilename.empty())
+                        {
+                            showSaveDialog = true;
+                            saveFilename = "project.pix";
+                        }
+                        else
+                        {
+                            if (canvas.saveProject())
+                            {
+                                exportStatus = "Saved " + canvas.currentFilename;
+                                exportStatusTimer = 3.0f;
+                            }
+                            else
+                            {
+                                exportStatus = "Failed to save " + canvas.currentFilename;
+                                exportStatusTimer = 3.0f;
+                            }
+                        }
+                    }
+                    else if (ctrl && ev.key.shift && ev.key.code == sf::Keyboard::S)
+                    {
+                        // NEW: Save As
+                        showSaveDialog = true;
+                        saveFilename = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                    }
+                    else if (showGIFExportDialog)
+                    {
+                        if (gifSizeInputActive)
+                        {
+                            gifSizeInputActive = false;
+                            gifDelayInputActive = true;
+                        }
+                        else
+                        {
+                            gifSizeInputActive = true;
+                            gifDelayInputActive = false;
                         }
                     }
                 }
@@ -1370,16 +1660,49 @@ int main()
                     }
                     else if (showGIFExportDialog)
                     {
+                        // Export GIF when Enter is pressed
+                        try
+                        {
+                            int delay = std::stoi(gifDelayStr);
+                            int size = std::stoi(gifSizeStr);
+                            if (delay > 0 && delay <= 100 && size > 0 && size <= 10)
+                            {
+                                if (canvas.exportAsGIF("export/animation.gif", delay, size))
+                                {
+                                    exportStatus = "Exported GIF: export/animation.gif (" +
+                                                   std::to_string(canvas.width * size) + "x" +
+                                                   std::to_string(canvas.height * size) + ")";
+                                    exportStatusTimer = 3.0f;
+                                    showGIFExportDialog = false;
+                                }
+                                else
+                                {
+                                    exportStatus = "Failed to export GIF";
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            exportStatus = "Invalid GIF values";
+                            exportStatusTimer = 3.0f;
+                        }
+                    }
+                    else if (showSaveDialog || showOpenDialog)
+                    {
                         if (ev.text.unicode == '\b') // Backspace
                         {
-                            if (!gifDelayStr.empty())
-                                gifDelayStr.pop_back();
+                            if (showSaveDialog && !saveFilename.empty())
+                                saveFilename.pop_back();
+                            else if (showOpenDialog && !openFilename.empty())
+                                openFilename.pop_back();
                         }
-                        else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
+                        else if (ev.text.unicode >= 32 && ev.text.unicode < 127) // Printable characters
                         {
-                            // Limit GIF delay input
-                            if (gifDelayStr.length() < 3)
-                                gifDelayStr += static_cast<char>(ev.text.unicode);
+                            if (showSaveDialog)
+                                saveFilename += static_cast<char>(ev.text.unicode);
+                            else if (showOpenDialog)
+                                openFilename += static_cast<char>(ev.text.unicode);
                         }
                     }
                     else if (renamingFrame)
@@ -1395,6 +1718,7 @@ int main()
                         }
                     }
                 }
+
             } // end events
 
             // UI layout measurements
@@ -1582,7 +1906,43 @@ int main()
                 heightInputActive = false;
                 uiElementClicked = true;
             }
+            // Save button
+            bool saveBtnHovered = (mpos.x >= (int)(colorX + 290) && mpos.x <= (int)(colorX + 290 + 60) &&
+                                   mpos.y >= (int)y && mpos.y <= (int)(y + bh));
+            drawButton(window, sf::FloatRect(colorX + 290, y, 60, bh), font, "SAVE", false, saveBtnHovered);
+            if (leftMousePressedThisFrame && saveBtnHovered && !uiElementClicked)
+            {
+                if (canvas.currentFilename.empty())
+                {
+                    showSaveDialog = true;
+                    saveFilename = "project.pix";
+                }
+                else
+                {
+                    if (canvas.saveProject())
+                    {
+                        exportStatus = "Saved " + canvas.currentFilename;
+                        exportStatusTimer = 3.0f;
+                    }
+                    else
+                    {
+                        exportStatus = "Failed to save " + canvas.currentFilename;
+                        exportStatusTimer = 3.0f;
+                    }
+                }
+                uiElementClicked = true;
+            }
 
+            // Open button
+            bool openBtnHovered = (mpos.x >= (int)(colorX + 360) && mpos.x <= (int)(colorX + 360 + 60) &&
+                                   mpos.y >= (int)y && mpos.y <= (int)(y + bh));
+            drawButton(window, sf::FloatRect(colorX + 360, y, 60, bh), font, "OPEN", false, openBtnHovered);
+            if (leftMousePressedThisFrame && openBtnHovered && !uiElementClicked)
+            {
+                showOpenDialog = true;
+                openFilename = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                uiElementClicked = true;
+            }
             // Draw canvas background (8-bit style checkerboard)
             sf::RectangleShape canvasBg({canvasArea.width, canvasArea.height});
             canvasBg.setPosition(canvasArea.left, canvasArea.top);
@@ -1830,9 +2190,12 @@ int main()
             {
                 showGIFExportDialog = !showGIFExportDialog;
                 gifDelayStr = "5";
+                gifSizeStr = "1"; // Default to 1x scale
+                gifSize = 1;
+                gifSizeInputActive = true;
+                gifDelayInputActive = false;
                 uiElementClicked = true;
             }
-
             // Godot Export button
             bool godotExportHovered = (mpos.x >= (int)(sidebar.left + 96) && mpos.x <= (int)(sidebar.left + 176) &&
                                        mpos.y >= (int)(exportY) && mpos.y <= (int)(exportY + 28));
@@ -2112,10 +2475,10 @@ int main()
                 }
             }
 
-            // NEW: Draw GIF export dialog
+            // NEW: Draw GIF export dialog with size options
             if (showGIFExportDialog)
             {
-                sf::Vector2f dialogSize(250, 150);
+                sf::Vector2f dialogSize(300, 200); // Increased height for size options
                 sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
 
                 // Background with 8-bit style
@@ -2133,15 +2496,35 @@ int main()
                 title.setFillColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
                 window.draw(title);
 
+                // Size input
+                sf::Text sizeLabel("SIZE (1-10x):", font, 14);
+                sizeLabel.setStyle(sf::Text::Bold);
+                sizeLabel.setPosition(dialogPos.x + 20, dialogPos.y + 40);
+                sizeLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(sizeLabel);
+
+                sf::RectangleShape sizeInput({60, 25});
+                sizeInput.setPosition(dialogPos.x + 130, dialogPos.y + 40);
+                sizeInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+                sizeInput.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+                sizeInput.setOutlineThickness(2);
+                window.draw(sizeInput);
+
+                sf::Text sizeText(gifSizeStr, font, 14);
+                sizeText.setStyle(sf::Text::Bold);
+                sizeText.setPosition(dialogPos.x + 135, dialogPos.y + 45);
+                sizeText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(sizeText);
+
                 // Delay input
                 sf::Text delayLabel("DELAY (1-100):", font, 14);
                 delayLabel.setStyle(sf::Text::Bold);
-                delayLabel.setPosition(dialogPos.x + 20, dialogPos.y + 40);
+                delayLabel.setPosition(dialogPos.x + 20, dialogPos.y + 75);
                 delayLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
                 window.draw(delayLabel);
 
-                sf::RectangleShape delayInput({80, 25});
-                delayInput.setPosition(dialogPos.x + 140, dialogPos.y + 40);
+                sf::RectangleShape delayInput({60, 25});
+                delayInput.setPosition(dialogPos.x + 130, dialogPos.y + 75);
                 delayInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
                 delayInput.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
                 delayInput.setOutlineThickness(2);
@@ -2149,36 +2532,54 @@ int main()
 
                 sf::Text delayText(gifDelayStr, font, 14);
                 delayText.setStyle(sf::Text::Bold);
-                delayText.setPosition(dialogPos.x + 145, dialogPos.y + 45);
+                delayText.setPosition(dialogPos.x + 135, dialogPos.y + 80);
                 delayText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
                 window.draw(delayText);
 
                 // Info text
-                sf::Text info("Higher delay = slower animation", font, 12);
+                std::string infoStr = "Output: " + std::to_string(canvas.width * gifSize) + "x" + std::to_string(canvas.height * gifSize);
+                sf::Text info(infoStr, font, 12);
                 info.setStyle(sf::Text::Bold);
-                info.setPosition(dialogPos.x + 20, dialogPos.y + 70);
+                info.setPosition(dialogPos.x + 20, dialogPos.y + 110);
                 info.setFillColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
                 window.draw(info);
 
+                sf::Text info2("Higher delay = slower animation", font, 12);
+                info2.setStyle(sf::Text::Bold);
+                info2.setPosition(dialogPos.x + 20, dialogPos.y + 125);
+                info2.setFillColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
+                window.draw(info2);
+
                 // Apply button
                 bool applyHovered = (mpos.x >= (int)(dialogPos.x + 50) && mpos.x <= (int)(dialogPos.x + 110) &&
-                                     mpos.y >= (int)(dialogPos.y + 95) && mpos.y <= (int)(dialogPos.y + 120));
-                drawButton(window, sf::FloatRect(dialogPos.x + 50, dialogPos.y + 95, 60, 25), font, "EXPORT", false, applyHovered);
+                                     mpos.y >= (int)(dialogPos.y + 150) && mpos.y <= (int)(dialogPos.y + 175));
+                drawButton(window, sf::FloatRect(dialogPos.x + 50, dialogPos.y + 150, 60, 25), font, "EXPORT", false, applyHovered);
 
                 // Cancel button
                 bool cancelHovered = (mpos.x >= (int)(dialogPos.x + 140) && mpos.x <= (int)(dialogPos.x + 200) &&
-                                      mpos.y >= (int)(dialogPos.y + 95) && mpos.y <= (int)(dialogPos.y + 120));
-                drawButton(window, sf::FloatRect(dialogPos.x + 140, dialogPos.y + 95, 60, 25), font, "CANCEL", false, cancelHovered);
+                                      mpos.y >= (int)(dialogPos.y + 150) && mpos.y <= (int)(dialogPos.y + 175));
+                drawButton(window, sf::FloatRect(dialogPos.x + 140, dialogPos.y + 150, 60, 25), font, "CANCEL", false, cancelHovered);
 
                 // Handle GIF export dialog clicks - ONLY on mouse press
                 if (leftMousePressedThisFrame && !uiElementClicked)
                 {
                     sf::Vector2i mm = sf::Mouse::getPosition(window);
 
+                    // Check size input click
+                    sf::FloatRect sizeInputRect(dialogPos.x + 130, dialogPos.y + 40, 60, 25);
+                    if (sizeInputRect.contains((float)mm.x, (float)mm.y))
+                    {
+                        gifSizeInputActive = true;
+                        gifDelayInputActive = false;
+                        uiElementClicked = true;
+                    }
+
                     // Check delay input click
-                    sf::FloatRect delayInputRect(dialogPos.x + 140, dialogPos.y + 40, 80, 25);
+                    sf::FloatRect delayInputRect(dialogPos.x + 130, dialogPos.y + 75, 60, 25);
                     if (delayInputRect.contains((float)mm.x, (float)mm.y))
                     {
+                        gifDelayInputActive = true;
+                        gifSizeInputActive = false;
                         uiElementClicked = true;
                     }
 
@@ -2188,11 +2589,14 @@ int main()
                         try
                         {
                             int delay = std::stoi(gifDelayStr);
-                            if (delay > 0 && delay <= 100)
+                            int size = std::stoi(gifSizeStr);
+                            if (delay > 0 && delay <= 100 && size > 0 && size <= 10)
                             {
-                                if (canvas.exportAsGIF("export/animation.gif", delay))
+                                if (canvas.exportAsGIF("export/animation.gif", delay, size))
                                 {
-                                    exportStatus = "Exported GIF: export/animation.gif";
+                                    exportStatus = "Exported GIF: export/animation.gif (" +
+                                                   std::to_string(canvas.width * size) + "x" +
+                                                   std::to_string(canvas.height * size) + ")";
                                     exportStatusTimer = 3.0f;
                                     showGIFExportDialog = false;
                                 }
@@ -2205,7 +2609,7 @@ int main()
                         }
                         catch (...)
                         {
-                            exportStatus = "Invalid GIF delay value";
+                            exportStatus = "Invalid GIF values";
                             exportStatusTimer = 3.0f;
                         }
                         uiElementClicked = true;
@@ -2227,7 +2631,6 @@ int main()
                     }
                 }
             }
-
             // NEW: Draw export status message
             if (!exportStatus.empty())
             {
