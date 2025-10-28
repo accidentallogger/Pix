@@ -11,6 +11,10 @@
 #include <cstdint>
 #include <cmath>
 #include <cctype>
+#include <memory>
+#include <thread>
+#include <atomic>
+#include <sys/stat.h> // For directory creation
 
 using u8 = sf::Uint8;
 using u32 = uint32_t;
@@ -21,6 +25,16 @@ struct Color
     u8 r = 0, g = 0, b = 0, a = 255;
     Color() {}
     Color(u8 rr, u8 gg, u8 bb, u8 aa = 255) : r(rr), g(gg), b(bb), a(aa) {}
+
+    bool operator==(const Color &other) const
+    {
+        return r == other.r && g == other.g && b == other.b && a == other.a;
+    }
+
+    bool operator!=(const Color &other) const
+    {
+        return !(*this == other);
+    }
 };
 
 // Now define the 8-bit color palette AFTER Color struct
@@ -48,6 +62,138 @@ namespace EightBitColors
         LightGray, White, Red, Orange, Yellow, Green,
         Blue, Indigo, Pink, Peach};
 }
+
+// Simple GIF encoder (minimal implementation)
+class SimpleGIFEncoder
+{
+private:
+    std::ofstream file;
+    int width, height;
+    int delay; // in hundredths of a second
+
+public:
+    SimpleGIFEncoder(const std::string &filename, int w, int h, int frameDelay = 5)
+        : width(w), height(h), delay(frameDelay)
+    {
+        file.open(filename, std::ios::binary);
+        if (!file)
+            return;
+
+        // Write GIF header
+        file << "GIF89a";
+
+        // Write Logical Screen Descriptor
+        file.put(width & 0xFF);
+        file.put((width >> 8) & 0xFF);
+        file.put(height & 0xFF);
+        file.put((height >> 8) & 0xFF);
+        file.put(0xF7); // Packed fields: global color table, 256 colors, 8 bits per pixel
+        file.put(0x00); // Background color index
+        file.put(0x00); // Pixel aspect ratio
+
+        // Write Global Color Table (simplified - using 8-bit palette)
+        for (int i = 0; i < 16; ++i)
+        {
+            file.put(EightBitColors::Palette[i].r);
+            file.put(EightBitColors::Palette[i].g);
+            file.put(EightBitColors::Palette[i].b);
+        }
+        // Fill remaining with black
+        for (int i = 16; i < 256; ++i)
+        {
+            file.put(0);
+            file.put(0);
+            file.put(0);
+        }
+
+        // Write Application Extension (for animation)
+        file.put(0x21); // Extension introducer
+        file.put(0xFF); // Application extension label
+        file.put(0x0B); // Block size
+        file.write("NETSCAPE2.0", 11);
+        file.put(0x03); // Sub-block size
+        file.put(0x01); // Loop sub-block ID
+        file.put(0x00); // Loop count (0 = infinite)
+        file.put(0x00); // Loop count
+        file.put(0x00); // Block terminator
+    }
+
+    ~SimpleGIFEncoder()
+    {
+        if (file)
+        {
+            file.put(0x3B); // GIF trailer
+            file.close();
+        }
+    }
+
+    bool addFrame(const sf::Image &image)
+    {
+        if (!file)
+            return false;
+
+        // Write Graphics Control Extension
+        file.put(0x21);                // Extension introducer
+        file.put(0xF9);                // Graphic control label
+        file.put(0x04);                // Block size
+        file.put(0x04);                // Disposal method, no user input
+        file.put(delay & 0xFF);        // Delay time low byte
+        file.put((delay >> 8) & 0xFF); // Delay time high byte
+        file.put(0x00);                // Transparent color index (none)
+        file.put(0x00);                // Block terminator
+
+        // Write Image Descriptor
+        file.put(0x2C); // Image separator
+        file.put(0x00); // Image left low byte
+        file.put(0x00); // Image left high byte
+        file.put(0x00); // Image top low byte
+        file.put(0x00); // Image top high byte
+        file.put(width & 0xFF);
+        file.put((width >> 8) & 0xFF);
+        file.put(height & 0xFF);
+        file.put((height >> 8) & 0xFF);
+        file.put(0x00); // No local color table, not interlaced
+
+        // Write image data (simplified - using LZW compression would be better)
+        // For simplicity, we'll use uncompressed data
+        file.put(0x08); // LZW minimum code size
+        file.put(0xFF); // First data sub-block size
+
+        for (int y = 0; y < height; ++y)
+        {
+            for (int x = 0; x < width; ++x)
+            {
+                sf::Color pixel = image.getPixel(x, y);
+                if (pixel.a == 0)
+                {
+                    file.put(0); // Transparent -> black
+                }
+                else
+                {
+                    // Find closest 8-bit color
+                    int bestIndex = 0;
+                    int bestDist = 255 * 255 * 3;
+                    for (int i = 0; i < 16; ++i)
+                    {
+                        const Color &paletteColor = EightBitColors::Palette[i];
+                        int dist = (pixel.r - paletteColor.r) * (pixel.r - paletteColor.r) +
+                                   (pixel.g - paletteColor.g) * (pixel.g - paletteColor.g) +
+                                   (pixel.b - paletteColor.b) * (pixel.b - paletteColor.b);
+                        if (dist < bestDist)
+                        {
+                            bestDist = dist;
+                            bestIndex = i;
+                        }
+                    }
+                    file.put(bestIndex);
+                }
+            }
+        }
+
+        file.put(0x00); // Block terminator
+        return true;
+    }
+};
 
 struct Frame
 {
@@ -380,6 +526,199 @@ public:
         f.updateThumbnail();
     }
 
+    // NEW: Export as GIF
+    bool exportAsGIF(const std::string &filename, int frameDelay = 5) const
+    {
+        if (frames.empty())
+            return false;
+
+        try
+        {
+            SimpleGIFEncoder gif(filename, width, height, frameDelay);
+            for (const auto &frame : frames)
+            {
+                if (!gif.addFrame(frame.image))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+        catch (...)
+        {
+            return false;
+        }
+    }
+
+    // NEW: Create directory function (cross-platform)
+    bool createDirectory(const std::string &path) const
+    {
+#ifdef _WIN32
+        return _mkdir(path.c_str()) == 0 || errno == EEXIST;
+#else
+        return mkdir(path.c_str(), 0755) == 0 || errno == EEXIST;
+#endif
+    }
+
+    // NEW: Export Godot resources
+    bool exportForGodot(const std::string &basePath) const
+    {
+        if (frames.empty())
+            return false;
+
+        try
+        {
+            // Create directory if it doesn't exist
+            std::string dir = basePath + "/godot_export/";
+
+            // Use our custom directory creation function
+            if (!createDirectory(dir))
+            {
+                std::cerr << "Failed to create directory: " << dir << std::endl;
+                return false;
+            }
+
+            if (frames.size() == 1)
+            {
+                // Single frame - export as sprite
+                return exportGodotSpriteSheet(dir + "sprite.png", dir + "sprite.tres");
+            }
+            else
+            {
+                // Multiple frames - export as sprite sheet and animation
+                return exportGodotAnimation(dir + "spritesheet.png", dir + "spritesheet.tres", dir + "animation.tres");
+            }
+        }
+        catch (const std::exception &e)
+        {
+            std::cerr << "Error exporting for Godot: " << e.what() << std::endl;
+            return false;
+        }
+        catch (...)
+        {
+            std::cerr << "Unknown error exporting for Godot" << std::endl;
+            return false;
+        }
+    }
+
+private:
+    bool exportGodotSpriteSheet(const std::string &imagePath, const std::string &resourcePath) const
+    {
+        // Export single frame as PNG
+        if (!frames[0].image.saveToFile(imagePath))
+            return false;
+
+        // Create Godot SpriteFrames resource
+        std::ofstream res(resourcePath);
+        if (!res)
+            return false;
+
+        res << "[gd_resource type=\"SpriteFrames\" load_steps=2 format=2]\n\n";
+        res << "[ext_resource path=\"res://" << imagePath.substr(imagePath.find_last_of("/\\") + 1) << "\" type=\"Texture\" id=1]\n\n";
+        res << "[resource]\n";
+        res << "animations = [ {\n";
+        res << "\"frames\": [ ExtResource( 1 ) ],\n";
+        res << "\"loop\": true,\n";
+        res << "\"name\": \"default\",\n";
+        res << "\"speed\": 5.0\n";
+        res << "} ]\n";
+
+        return true;
+    }
+
+    bool exportGodotAnimation(const std::string &imagePath, const std::string &spritePath, const std::string &animPath) const
+    {
+        // Create sprite sheet (all frames horizontally)
+        int totalWidth = width * frames.size();
+        sf::Image spriteSheet;
+        spriteSheet.create(totalWidth, height, sf::Color(0, 0, 0, 0));
+
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            for (unsigned y = 0; y < height; ++y)
+            {
+                for (unsigned x = 0; x < width; ++x)
+                {
+                    spriteSheet.setPixel(x + i * width, y, frames[i].image.getPixel(x, y));
+                }
+            }
+        }
+
+        if (!spriteSheet.saveToFile(imagePath))
+            return false;
+
+        // Create SpriteFrames resource
+        std::ofstream spriteRes(spritePath);
+        if (!spriteRes)
+            return false;
+
+        spriteRes << "[gd_resource type=\"SpriteFrames\" load_steps=2 format=2]\n\n";
+        spriteRes << "[ext_resource path=\"res://" << imagePath.substr(imagePath.find_last_of("/\\") + 1) << "\" type=\"Texture\" id=1]\n\n";
+        spriteRes << "[resource]\n";
+        spriteRes << "animations = [ {\n";
+        spriteRes << "\"frames\": [";
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            spriteRes << " ExtResource( 1 )";
+            if (i < frames.size() - 1)
+                spriteRes << ",";
+        }
+        spriteRes << " ],\n";
+        spriteRes << "\"loop\": true,\n";
+        spriteRes << "\"name\": \"default\",\n";
+        spriteRes << "\"speed\": 5.0\n";
+        spriteRes << "} ]\n";
+
+        // Create Animation resource
+        std::ofstream animRes(animPath);
+        if (!animRes)
+            return false;
+
+        animRes << "[gd_resource type=\"Animation\" load_steps=2 format=2]\n\n";
+        animRes << "[ext_resource path=\"res://" << spritePath.substr(spritePath.find_last_of("/\\") + 1) << "\" type=\"SpriteFrames\" id=1]\n\n";
+        animRes << "[resource]\n";
+        animRes << "loop = true\n";
+        animRes << "step = 0.1\n";
+        animRes << "length = " << (frames.size() * 0.2) << "\n";
+        animRes << "tracks/0 = \"value\"\n";
+        animRes << "tracks/0/type = 0\n";
+        animRes << "tracks/0/path = NodePath(\"Sprite:frame\")\n";
+        animRes << "tracks/0/interp = 1\n";
+        animRes << "tracks/0/loop_wrap = true\n";
+        animRes << "tracks/0/imported = false\n";
+        animRes << "tracks/0/enabled = true\n";
+        animRes << "tracks/0/keys = {\n";
+        animRes << "\"times\": PoolRealArray(";
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            animRes << (i * 0.2);
+            if (i < frames.size() - 1)
+                animRes << ", ";
+        }
+        animRes << "),\n";
+        animRes << "\"transitions\": PoolRealArray(";
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            animRes << "1.0";
+            if (i < frames.size() - 1)
+                animRes << ", ";
+        }
+        animRes << "),\n";
+        animRes << "\"update\": 0,\n";
+        animRes << "\"values\": [ ";
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            animRes << i;
+            if (i < frames.size() - 1)
+                animRes << ", ";
+        }
+        animRes << " ]\n";
+        animRes << "}\n";
+
+        return true;
+    }
+
+public:
     // Save and load .pix custom format
     bool saveToPix(const std::string &filename) const
     {
@@ -700,6 +1039,11 @@ int main()
     bool showEraserSizeDialog = false;
     std::string eraserSizeStr = "1";
 
+    // NEW: Export dialogs
+    bool showGIFExportDialog = false;
+    bool showGodotExportDialog = false;
+    std::string gifDelayStr = "5";
+
     // Track if we just clicked a UI element (to prevent drawing on UI clicks)
     bool uiElementClicked = false;
 
@@ -715,6 +1059,10 @@ int main()
     // Hover states for buttons
     int hoveredToolButton = -1;
 
+    // NEW: Export status message
+    std::string exportStatus = "";
+    float exportStatusTimer = 0.0f;
+
     sf::Clock clock;
 
     try
@@ -727,6 +1075,16 @@ int main()
             uiElementClicked = false;
             hoveredToolButton = -1;
             leftMousePressedThisFrame = false; // Reset single press flag
+
+            // Update export status timer
+            if (exportStatusTimer > 0)
+            {
+                exportStatusTimer -= dt;
+                if (exportStatusTimer <= 0)
+                {
+                    exportStatus = "";
+                }
+            }
 
             // event handling
             sf::Event ev;
@@ -780,11 +1138,13 @@ int main()
                         // save
                         if (canvas.saveToPix("project.pix"))
                         {
-                            std::cout << "Saved project.pix\n";
+                            exportStatus = "Saved project.pix";
+                            exportStatusTimer = 3.0f;
                         }
                         else
                         {
-                            std::cerr << "Failed to save project.pix\n";
+                            exportStatus = "Failed to save project.pix";
+                            exportStatusTimer = 3.0f;
                         }
                     }
                     else if (ctrl && ev.key.shift && ev.key.code == sf::Keyboard::S)
@@ -792,11 +1152,13 @@ int main()
                         // export frames as PNG sequence
                         if (canvas.exportAllFramesPNG("export/frame"))
                         {
-                            std::cout << "Exported frames to export/frame_#.png\n";
+                            exportStatus = "Exported frames to export/frame_#.png";
+                            exportStatusTimer = 3.0f;
                         }
                         else
                         {
-                            std::cerr << "Failed to export frames\n";
+                            exportStatus = "Failed to export frames";
+                            exportStatusTimer = 3.0f;
                         }
                     }
                     else if (ev.key.code == sf::Keyboard::Space)
@@ -833,7 +1195,7 @@ int main()
                         showEraserSizeDialog = !showEraserSizeDialog;
                         eraserSizeStr = std::to_string(canvas.eraserSize);
                     }
-                    else if (ev.key.code == sf::Keyboard::Tab && (showResizeDialog || showEraserSizeDialog))
+                    else if (ev.key.code == sf::Keyboard::Tab && (showResizeDialog || showEraserSizeDialog || showGIFExportDialog))
                     {
                         // Switch between inputs in dialogs
                         if (showResizeDialog)
@@ -901,6 +1263,33 @@ int main()
                                 std::cout << "Invalid input for eraser size!\n";
                             }
                         }
+                        else if (showGIFExportDialog)
+                        {
+                            // Export GIF when Enter is pressed
+                            try
+                            {
+                                int delay = std::stoi(gifDelayStr);
+                                if (delay > 0 && delay <= 100)
+                                {
+                                    if (canvas.exportAsGIF("export/animation.gif", delay))
+                                    {
+                                        exportStatus = "Exported GIF: export/animation.gif";
+                                        exportStatusTimer = 3.0f;
+                                        showGIFExportDialog = false;
+                                    }
+                                    else
+                                    {
+                                        exportStatus = "Failed to export GIF";
+                                        exportStatusTimer = 3.0f;
+                                    }
+                                }
+                            }
+                            catch (...)
+                            {
+                                exportStatus = "Invalid GIF delay value";
+                                exportStatusTimer = 3.0f;
+                            }
+                        }
                     }
                     else if (ev.key.code == sf::Keyboard::Escape)
                     {
@@ -921,6 +1310,16 @@ int main()
                         {
                             // Cancel eraser size dialog
                             showEraserSizeDialog = false;
+                        }
+                        else if (showGIFExportDialog)
+                        {
+                            // Cancel GIF export dialog
+                            showGIFExportDialog = false;
+                        }
+                        else if (showGodotExportDialog)
+                        {
+                            // Cancel Godot export dialog
+                            showGodotExportDialog = false;
                         }
                         else if (colorPicker.isOpen)
                         {
@@ -969,6 +1368,20 @@ int main()
                                 eraserSizeStr += static_cast<char>(ev.text.unicode);
                         }
                     }
+                    else if (showGIFExportDialog)
+                    {
+                        if (ev.text.unicode == '\b') // Backspace
+                        {
+                            if (!gifDelayStr.empty())
+                                gifDelayStr.pop_back();
+                        }
+                        else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
+                        {
+                            // Limit GIF delay input
+                            if (gifDelayStr.length() < 3)
+                                gifDelayStr += static_cast<char>(ev.text.unicode);
+                        }
+                    }
                     else if (renamingFrame)
                     {
                         if (ev.text.unicode == '\b') // Backspace
@@ -1013,7 +1426,7 @@ int main()
             }
 
             // Drawing: convert mouse to pixel coords
-            if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !renamingFrame)
+            if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame)
             {
                 // map mouse to canvas pixel position
                 float localX = (mpos.x - canvasArea.left - canvas.pan.x) / canvas.zoom;
@@ -1073,7 +1486,7 @@ int main()
             float bw = 64, bh = 32, spacing = 6;
 
             // Check hover states for tool buttons
-            if (!uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !renamingFrame)
+            if (!uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame)
             {
                 // Pencil button hover
                 if (mpos.x >= (int)x && mpos.x <= (int)(x + bw) && mpos.y >= (int)y && mpos.y <= (int)(y + bh))
@@ -1406,19 +1819,54 @@ int main()
                 uiElementClicked = true;
             }
 
-            // Export button with 8-bit style
-            bool exportHovered = (mpos.x >= (int)(sidebar.left + 96) && mpos.x <= (int)(sidebar.left + 176) &&
-                                  mpos.y >= (int)(fy + 8) && mpos.y <= (int)(fy + 36));
-            drawButton(window, sf::FloatRect(sidebar.left + 96, fy + 8, 80, 28), font, "EXPORT", false, exportHovered);
-            if (leftMousePressedThisFrame && exportHovered && !renamingFrame && !uiElementClicked)
+            // NEW: Export buttons
+            float exportY = fy + 45;
+
+            // GIF Export button
+            bool gifExportHovered = (mpos.x >= (int)(sidebar.left + 8) && mpos.x <= (int)(sidebar.left + 88) &&
+                                     mpos.y >= (int)(exportY) && mpos.y <= (int)(exportY + 28));
+            drawButton(window, sf::FloatRect(sidebar.left + 8, exportY, 80, 28), font, "EXPORT GIF", false, gifExportHovered);
+            if (leftMousePressedThisFrame && gifExportHovered && !uiElementClicked)
             {
-                if (canvas.exportCurrentFramePNG("export/frame.png"))
+                showGIFExportDialog = !showGIFExportDialog;
+                gifDelayStr = "5";
+                uiElementClicked = true;
+            }
+
+            // Godot Export button
+            bool godotExportHovered = (mpos.x >= (int)(sidebar.left + 96) && mpos.x <= (int)(sidebar.left + 176) &&
+                                       mpos.y >= (int)(exportY) && mpos.y <= (int)(exportY + 28));
+            drawButton(window, sf::FloatRect(sidebar.left + 96, exportY, 80, 28), font, "GODOT", false, godotExportHovered);
+            if (leftMousePressedThisFrame && godotExportHovered && !uiElementClicked)
+            {
+                if (canvas.exportForGodot("export"))
                 {
-                    std::cout << "Exported current frame to export/frame.png\n";
+                    exportStatus = "Exported Godot resources to export/godot_export/";
+                    exportStatusTimer = 5.0f;
                 }
                 else
                 {
-                    std::cerr << "Failed to export frame\n";
+                    exportStatus = "Failed to export Godot resources";
+                    exportStatusTimer = 3.0f;
+                }
+                uiElementClicked = true;
+            }
+
+            // PNG Export button
+            bool pngExportHovered = (mpos.x >= (int)(sidebar.left + 8) && mpos.x <= (int)(sidebar.left + 88) &&
+                                     mpos.y >= (int)(exportY + 35) && mpos.y <= (int)(exportY + 63));
+            drawButton(window, sf::FloatRect(sidebar.left + 8, exportY + 35, 80, 28), font, "EXPORT PNG", false, pngExportHovered);
+            if (leftMousePressedThisFrame && pngExportHovered && !uiElementClicked)
+            {
+                if (canvas.exportCurrentFramePNG("export/frame.png"))
+                {
+                    exportStatus = "Exported current frame to export/frame.png";
+                    exportStatusTimer = 3.0f;
+                }
+                else
+                {
+                    exportStatus = "Failed to export frame";
+                    exportStatusTimer = 3.0f;
                 }
                 uiElementClicked = true;
             }
@@ -1564,7 +2012,7 @@ int main()
                 }
             }
 
-            // NEW: Draw eraser size dialog with 8-bit style
+            // Draw eraser size dialog with 8-bit style
             if (showEraserSizeDialog)
             {
                 sf::Vector2f dialogSize(250, 120);
@@ -1662,6 +2110,132 @@ int main()
                         uiElementClicked = true;
                     }
                 }
+            }
+
+            // NEW: Draw GIF export dialog
+            if (showGIFExportDialog)
+            {
+                sf::Vector2f dialogSize(250, 150);
+                sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
+
+                // Background with 8-bit style
+                sf::RectangleShape dialogBg(dialogSize);
+                dialogBg.setPosition(dialogPos);
+                dialogBg.setFillColor(sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b));
+                dialogBg.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+                dialogBg.setOutlineThickness(2);
+                window.draw(dialogBg);
+
+                // Title
+                sf::Text title("EXPORT GIF", font, 16);
+                title.setStyle(sf::Text::Bold);
+                title.setPosition(dialogPos.x + 10, dialogPos.y + 10);
+                title.setFillColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+                window.draw(title);
+
+                // Delay input
+                sf::Text delayLabel("DELAY (1-100):", font, 14);
+                delayLabel.setStyle(sf::Text::Bold);
+                delayLabel.setPosition(dialogPos.x + 20, dialogPos.y + 40);
+                delayLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(delayLabel);
+
+                sf::RectangleShape delayInput({80, 25});
+                delayInput.setPosition(dialogPos.x + 140, dialogPos.y + 40);
+                delayInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+                delayInput.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+                delayInput.setOutlineThickness(2);
+                window.draw(delayInput);
+
+                sf::Text delayText(gifDelayStr, font, 14);
+                delayText.setStyle(sf::Text::Bold);
+                delayText.setPosition(dialogPos.x + 145, dialogPos.y + 45);
+                delayText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(delayText);
+
+                // Info text
+                sf::Text info("Higher delay = slower animation", font, 12);
+                info.setStyle(sf::Text::Bold);
+                info.setPosition(dialogPos.x + 20, dialogPos.y + 70);
+                info.setFillColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
+                window.draw(info);
+
+                // Apply button
+                bool applyHovered = (mpos.x >= (int)(dialogPos.x + 50) && mpos.x <= (int)(dialogPos.x + 110) &&
+                                     mpos.y >= (int)(dialogPos.y + 95) && mpos.y <= (int)(dialogPos.y + 120));
+                drawButton(window, sf::FloatRect(dialogPos.x + 50, dialogPos.y + 95, 60, 25), font, "EXPORT", false, applyHovered);
+
+                // Cancel button
+                bool cancelHovered = (mpos.x >= (int)(dialogPos.x + 140) && mpos.x <= (int)(dialogPos.x + 200) &&
+                                      mpos.y >= (int)(dialogPos.y + 95) && mpos.y <= (int)(dialogPos.y + 120));
+                drawButton(window, sf::FloatRect(dialogPos.x + 140, dialogPos.y + 95, 60, 25), font, "CANCEL", false, cancelHovered);
+
+                // Handle GIF export dialog clicks - ONLY on mouse press
+                if (leftMousePressedThisFrame && !uiElementClicked)
+                {
+                    sf::Vector2i mm = sf::Mouse::getPosition(window);
+
+                    // Check delay input click
+                    sf::FloatRect delayInputRect(dialogPos.x + 140, dialogPos.y + 40, 80, 25);
+                    if (delayInputRect.contains((float)mm.x, (float)mm.y))
+                    {
+                        uiElementClicked = true;
+                    }
+
+                    // Apply button
+                    if (applyHovered)
+                    {
+                        try
+                        {
+                            int delay = std::stoi(gifDelayStr);
+                            if (delay > 0 && delay <= 100)
+                            {
+                                if (canvas.exportAsGIF("export/animation.gif", delay))
+                                {
+                                    exportStatus = "Exported GIF: export/animation.gif";
+                                    exportStatusTimer = 3.0f;
+                                    showGIFExportDialog = false;
+                                }
+                                else
+                                {
+                                    exportStatus = "Failed to export GIF";
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+                        }
+                        catch (...)
+                        {
+                            exportStatus = "Invalid GIF delay value";
+                            exportStatusTimer = 3.0f;
+                        }
+                        uiElementClicked = true;
+                    }
+
+                    // Cancel button
+                    if (cancelHovered)
+                    {
+                        showGIFExportDialog = false;
+                        uiElementClicked = true;
+                    }
+
+                    // Click outside dialog - close it
+                    sf::FloatRect dialogRect(dialogPos.x, dialogPos.y, dialogSize.x, dialogSize.y);
+                    if (!dialogRect.contains((float)mm.x, (float)mm.y))
+                    {
+                        showGIFExportDialog = false;
+                        uiElementClicked = true;
+                    }
+                }
+            }
+
+            // NEW: Draw export status message
+            if (!exportStatus.empty())
+            {
+                sf::Text statusText(exportStatus, font, 14);
+                statusText.setStyle(sf::Text::Bold);
+                statusText.setPosition(winSize.x / 2 - statusText.getLocalBounds().width / 2, winSize.y - 40);
+                statusText.setFillColor(sf::Color(EightBitColors::Green.r, EightBitColors::Green.g, EightBitColors::Green.b));
+                window.draw(statusText);
             }
 
             // Small status text with 8-bit style
