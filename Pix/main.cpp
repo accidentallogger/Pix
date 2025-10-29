@@ -31,6 +31,7 @@ using u8 = sf::Uint8;
 using u32 = uint32_t;
 
 // Define Color struct FIRST
+
 struct Color
 {
     u8 r = 0, g = 0, b = 0, a = 255;
@@ -888,7 +889,50 @@ private:
         w.draw(t);
     }
 };
+struct Action
+{
+    enum Type
+    {
+        Draw,
+        Fill,
+        Erase
+    };
+    Type type;
+    std::vector<std::pair<sf::Vector2i, sf::Color>> pixels; // Before state
+    sf::Color newColor;                                     // For fill actions
+    sf::Vector2i fillPos;                                   // For fill actions
 
+    // Add constructor that takes Type
+    Action(Type t) : type(t) {}
+
+    // Default constructor
+    Action() : type(Draw) {}
+};
+
+struct FrameHistory
+{
+    std::vector<Action> undoStack;
+    std::vector<Action> redoStack;
+    static const int MAX_HISTORY = 100; // Make it static
+
+    // Add default constructor
+    FrameHistory() = default;
+
+    // Add copy constructor
+    FrameHistory(const FrameHistory &other)
+        : undoStack(other.undoStack), redoStack(other.redoStack) {}
+
+    // Add assignment operator
+    FrameHistory &operator=(const FrameHistory &other)
+    {
+        if (this != &other)
+        {
+            undoStack = other.undoStack;
+            redoStack = other.redoStack;
+        }
+        return *this;
+    }
+};
 class Canvas
 {
 public:
@@ -903,18 +947,134 @@ public:
     bool onionSkin = false;
     int eraserSize = 1; // New: Eraser size management
     std::string currentFilename;
-    Canvas(unsigned w = 64, unsigned h = 64) : width(w), height(h)
+
+    // Undo/Redo methods
+    bool canUndo() const
     {
-        // Add bounds checking
-        if (w == 0 || h == 0 || w > 2048 || h > 2048)
-        {
-            std::cerr << "Invalid canvas dimensions: " << w << "x" << h << std::endl;
-            width = 64;
-            height = 64;
-        }
-        frames.emplace_back(width, height, "Frame 0");
+        if (frames.empty() || currentFrame < 0 || currentFrame >= (int)frameHistories.size())
+            return false;
+        return !frameHistories[currentFrame].undoStack.empty();
     }
 
+    bool canRedo() const
+    {
+        if (frames.empty() || currentFrame < 0 || currentFrame >= (int)frameHistories.size())
+            return false;
+        return !frameHistories[currentFrame].redoStack.empty();
+    }
+
+    bool undo()
+    {
+        if (frames.empty() || currentFrame < 0 || currentFrame >= (int)frameHistories.size())
+            return false;
+
+        auto &history = frameHistories[currentFrame];
+        if (history.undoStack.empty())
+            return false;
+
+        Action action = history.undoStack.back();
+        history.undoStack.pop_back();
+
+        // Perform undo based on action type
+        Frame &frame = frames[currentFrame];
+        switch (action.type)
+        {
+        case Action::Draw:
+        case Action::Erase:
+            // Restore previous pixel states
+            for (const auto &pixel : action.pixels)
+            {
+                if (pixel.first.x >= 0 && pixel.first.x < (int)width &&
+                    pixel.first.y >= 0 && pixel.first.y < (int)height)
+                {
+                    frame.setPixel(pixel.first.x, pixel.first.y, pixel.second);
+                }
+            }
+            break;
+        case Action::Fill:
+            // For fill, we stored the original color at the fill position
+            if (!action.pixels.empty())
+            {
+                const auto &original = action.pixels[0];
+                if (original.first.x >= 0 && original.first.x < (int)width &&
+                    original.first.y >= 0 && original.first.y < (int)height)
+                {
+                    // Re-flood fill with the original color
+                    floodFill(original.first.x, original.first.y, original.second);
+                }
+            }
+            break;
+        }
+
+        // Add to redo stack
+        history.redoStack.push_back(action);
+        frame.updateThumbnail();
+        return true;
+    }
+
+    bool redo()
+    {
+        if (frames.empty() || currentFrame < 0 || currentFrame >= (int)frameHistories.size())
+            return false;
+
+        auto &history = frameHistories[currentFrame];
+        if (history.redoStack.empty())
+            return false;
+
+        Action action = history.redoStack.back();
+        history.redoStack.pop_back();
+
+        // Perform redo based on action type
+        Frame &frame = frames[currentFrame];
+        switch (action.type)
+        {
+        case Action::Draw:
+            // Re-apply the drawing
+            for (const auto &pixel : action.pixels)
+            {
+                if (pixel.first.x >= 0 && pixel.first.x < (int)width &&
+                    pixel.first.y >= 0 && pixel.first.y < (int)height)
+                {
+                    frame.setPixel(pixel.first.x, pixel.first.y, action.newColor);
+                }
+            }
+            break;
+        case Action::Erase:
+            // Re-apply erasure (transparent)
+            for (const auto &pixel : action.pixels)
+            {
+                if (pixel.first.x >= 0 && pixel.first.x < (int)width &&
+                    pixel.first.y >= 0 && pixel.first.y < (int)height)
+                {
+                    frame.setPixel(pixel.first.x, pixel.first.y, sf::Color(0, 0, 0, 0));
+                }
+            }
+            break;
+        case Action::Fill:
+            // Re-apply the fill
+            if (action.fillPos.x >= 0 && action.fillPos.x < (int)width &&
+                action.fillPos.y >= 0 && action.fillPos.y < (int)height)
+            {
+                floodFill(action.fillPos.x, action.fillPos.y, action.newColor);
+            }
+            break;
+        }
+
+        // Add back to undo stack
+        history.undoStack.push_back(action);
+        frame.updateThumbnail();
+        return true;
+    }
+
+    void clearRedoStack(int frameIndex)
+    {
+        if (frameIndex >= 0 && frameIndex < (int)frameHistories.size())
+        {
+            frameHistories[frameIndex].redoStack.clear();
+        }
+    }
+
+    // Save methods
     bool saveProject()
     {
         if (currentFilename.empty())
@@ -924,10 +1084,110 @@ public:
         return saveToPix(currentFilename);
     }
 
-    // NEW: Save project as (new filename)
     bool saveProjectAs(const std::string &filename)
     {
-        return saveToPix(filename);
+        if (saveToPix(filename))
+        {
+            currentFilename = filename; // Update current filename to the new one
+            return true;
+        }
+        return false;
+    }
+
+    Canvas(unsigned w = 64, unsigned h = 64) : width(w), height(h)
+    {
+        if (w == 0 || h == 0 || w > 2048 || h > 2048)
+        {
+            std::cerr << "Invalid canvas dimensions: " << w << "x" << h << std::endl;
+            width = 64;
+            height = 64;
+        }
+        frames.emplace_back(width, height, "Frame 0");
+        frameHistories.push_back(FrameHistory()); // Add history for first frame
+    }
+
+    // Add this method for single pixel drawing with history
+    void setPixelAtCurrentFrame(int x, int y, const sf::Color &c)
+    {
+        if (x < 0 || y < 0 || x >= (int)width || y >= (int)height || frames.empty())
+            return;
+
+        Frame &f = frames[currentFrame];
+        sf::Color oldColor = f.getPixel(x, y);
+
+        // Only record if the color is actually changing
+        if (oldColor != c)
+        {
+            std::vector<std::pair<sf::Vector2i, sf::Color>> changedPixels;
+            changedPixels.push_back({{x, y}, oldColor});
+
+            Action::Type actionType = (c.a == 0) ? Action::Erase : Action::Draw;
+            Action action(actionType); // Use new constructor
+            action.pixels = changedPixels;
+            action.newColor = c;
+
+            auto &history = frameHistories[currentFrame];
+            history.redoStack.clear();
+            history.undoStack.push_back(action);
+
+            if (history.undoStack.size() > history.MAX_HISTORY)
+            {
+                history.undoStack.erase(history.undoStack.begin());
+            }
+
+            f.setPixel(x, y, c);
+        }
+    }
+    // Multi-pixel drawing for eraser size
+    void setPixelsAtCurrentFrame(int centerX, int centerY, const sf::Color &c, int size)
+    {
+        if (frames.empty())
+            return;
+
+        Frame &f = frames[currentFrame];
+        int halfSize = size / 2;
+        std::vector<std::pair<sf::Vector2i, sf::Color>> changedPixels;
+
+        // Record all pixels that will be changed
+        for (int y = centerY - halfSize; y <= centerY + halfSize; ++y)
+        {
+            for (int x = centerX - halfSize; x <= centerX + halfSize; ++x)
+            {
+                if (x >= 0 && y >= 0 && x < (int)width && y < (int)height)
+                {
+                    sf::Color oldColor = f.getPixel(x, y);
+                    if (oldColor != c)
+                    {
+                        changedPixels.push_back({{x, y}, oldColor});
+                    }
+                }
+            }
+        }
+
+        // Only push action if pixels actually changed
+        if (!changedPixels.empty())
+        {
+            Action::Type actionType = (c.a == 0) ? Action::Erase : Action::Draw;
+            Action action(actionType);
+            action.pixels = changedPixels;
+            action.newColor = c;
+
+            auto &history = frameHistories[currentFrame];
+            history.redoStack.clear();
+            history.undoStack.push_back(action);
+
+            if (history.undoStack.size() > history.MAX_HISTORY)
+            {
+                history.undoStack.erase(history.undoStack.begin());
+            }
+
+            // Apply the changes
+            for (const auto &pixel : changedPixels)
+            {
+                f.setPixel(pixel.first.x, pixel.first.y, c);
+            }
+            f.updateThumbnail();
+        }
     }
 
     void resizeCanvas(unsigned newWidth, unsigned newHeight)
@@ -974,22 +1234,25 @@ public:
         width = w;
         height = h;
         frames.clear();
+        frameHistories.clear(); // Clear histories
         frames.emplace_back(w, h, "Frame 0");
+        frameHistories.push_back(FrameHistory()); // Add history for first frame
         currentFrame = 0;
         zoom = 8.0f;
         pan = {0, 0};
-        eraserSize = 1;       // Reset eraser size
-        currentFilename = ""; // NEW: Reset filename
+        eraserSize = 1;
+        currentFilename = "";
     }
+
     void addFrame()
     {
-        // Limit maximum frames to prevent memory issues
         if (frames.size() >= 1000)
         {
             std::cerr << "Maximum frame limit reached!" << std::endl;
             return;
         }
         frames.emplace_back(width, height, "Frame " + std::to_string(frames.size()));
+        frameHistories.push_back(FrameHistory()); // Add history for new frame
         currentFrame = (int)frames.size() - 1;
     }
 
@@ -998,7 +1261,6 @@ public:
         if (frames.empty())
             return;
 
-        // Limit maximum frames
         if (frames.size() >= 1000)
         {
             std::cerr << "Maximum frame limit reached!" << std::endl;
@@ -1008,6 +1270,7 @@ public:
         Frame newFrame = frames[currentFrame];
         newFrame.name = frames[currentFrame].name + " copy";
         frames.insert(frames.begin() + currentFrame + 1, newFrame);
+        frameHistories.insert(frameHistories.begin() + currentFrame + 1, FrameHistory()); // Duplicate history
         currentFrame++;
     }
 
@@ -1016,8 +1279,9 @@ public:
         if (frames.size() <= 1 || index < 0 || index >= (int)frames.size())
             return;
 
-        // Delete the specified frame
+        // Delete the specified frame and its history
         frames.erase(frames.begin() + index);
+        frameHistories.erase(frameHistories.begin() + index);
 
         // Adjust current frame index
         if (currentFrame >= (int)frames.size())
@@ -1032,6 +1296,12 @@ public:
         {
             // Swap the current frame with the one above it
             std::swap(frames[currentFrame], frames[currentFrame - 1]);
+
+            // Manual swap for frameHistories
+            FrameHistory temp = frameHistories[currentFrame];
+            frameHistories[currentFrame] = frameHistories[currentFrame - 1];
+            frameHistories[currentFrame - 1] = temp;
+
             // Update currentFrame to follow the frame that was moved
             currentFrame--;
         }
@@ -1043,16 +1313,22 @@ public:
         {
             // Swap the current frame with the one below it
             std::swap(frames[currentFrame], frames[currentFrame + 1]);
+
+            // Manual swap for frameHistories
+            FrameHistory temp = frameHistories[currentFrame];
+            frameHistories[currentFrame] = frameHistories[currentFrame + 1];
+            frameHistories[currentFrame + 1] = temp;
+
             // Update currentFrame to follow the frame that was moved
             currentFrame++;
         }
     }
-
     void nextFrame()
     {
         if (!frames.empty())
             currentFrame = (currentFrame + 1) % frames.size();
     }
+
     void prevFrame()
     {
         if (!frames.empty())
@@ -1068,43 +1344,18 @@ public:
         return frames[currentFrame].image;
     }
 
-    void setPixelAtCurrentFrame(int x, int y, const sf::Color &c)
-    {
-        if (x < 0 || y < 0 || x >= (int)width || y >= (int)height || frames.empty())
-            return;
-        Frame &f = frames[currentFrame];
-        f.setPixel(x, y, c);
-    }
-
-    // New: Set multiple pixels for eraser size
-    void setPixelsAtCurrentFrame(int centerX, int centerY, const sf::Color &c, int size)
-    {
-        if (frames.empty())
-            return;
-
-        Frame &f = frames[currentFrame];
-        int halfSize = size / 2;
-
-        for (int y = centerY - halfSize; y <= centerY + halfSize; ++y)
-        {
-            for (int x = centerX - halfSize; x <= centerX + halfSize; ++x)
-            {
-                if (x >= 0 && y >= 0 && x < (int)width && y < (int)height)
-                {
-                    f.setPixel(x, y, c);
-                }
-            }
-        }
-    }
-
     void floodFill(int sx, int sy, const sf::Color &newColor)
     {
         if (sx < 0 || sy < 0 || sx >= (int)width || sy >= (int)height || frames.empty())
             return;
+
         Frame &f = frames[currentFrame];
         sf::Color target = f.getPixel(sx, sy);
         if (target == newColor)
             return;
+
+        // Record the original state before filling
+        std::vector<std::pair<sf::Vector2i, sf::Color>> originalPixels;
 
         // Use iterative flood fill with bounds checking
         std::vector<sf::Vector2i> stack;
@@ -1121,12 +1372,22 @@ public:
             if (f.getPixel(x, y) != target)
                 continue;
 
+            // Record original pixel before changing
+            originalPixels.push_back({{x, y}, target});
             f.setPixel(x, y, newColor);
+
             stack.emplace_back(x + 1, y);
             stack.emplace_back(x - 1, y);
             stack.emplace_back(x, y + 1);
             stack.emplace_back(x, y - 1);
         }
+
+        // Push fill action to history
+        if (!originalPixels.empty())
+        {
+            pushFillAction(currentFrame, {sx, sy}, target, newColor);
+        }
+
         f.updateThumbnail();
     }
 
@@ -1188,6 +1449,7 @@ public:
             return false;
         }
     }
+
     // NEW: Create directory function (cross-platform)
     bool createDirectory(const std::string &path) const
     {
@@ -1239,7 +1501,204 @@ public:
         }
     }
 
+    // Save and load .pix custom format
+    bool saveToPix(const std::string &filename)
+    {
+        std::ofstream ofs(filename, std::ios::binary);
+        if (!ofs)
+            return false;
+
+        // Write header
+        ofs.write("PIX1", 4); // magic
+
+        auto write32 = [&](u32 v)
+        {
+            char bytes[4];
+            bytes[0] = (v >> 0) & 0xFF;
+            bytes[1] = (v >> 8) & 0xFF;
+            bytes[2] = (v >> 16) & 0xFF;
+            bytes[3] = (v >> 24) & 0xFF;
+            ofs.write(bytes, 4);
+        };
+
+        write32(width);
+        write32(height);
+        write32((u32)frames.size());
+
+        for (const Frame &f : frames)
+        {
+            // Write frame name
+            u32 nameLen = (u32)f.name.size();
+            write32(nameLen);
+            ofs.write(f.name.c_str(), nameLen);
+
+            // Write frame pixels (RGBA)
+            const sf::Image &img = f.image;
+            auto size = img.getSize();
+
+            // Convert pixels to byte array
+            std::vector<sf::Uint8> pixels(size.x * size.y * 4);
+            for (unsigned y = 0; y < size.y; ++y)
+            {
+                for (unsigned x = 0; x < size.x; ++x)
+                {
+                    sf::Color pixel = img.getPixel(x, y);
+                    unsigned index = (y * size.x + x) * 4;
+                    pixels[index] = pixel.r;
+                    pixels[index + 1] = pixel.g;
+                    pixels[index + 2] = pixel.b;
+                    pixels[index + 3] = pixel.a;
+                }
+            }
+
+            ofs.write((char *)pixels.data(), pixels.size());
+        }
+
+        currentFilename = filename; // NEW: Update current filename
+        return true;
+    }
+
+    bool loadFromPix(const std::string &filename)
+    {
+        std::ifstream ifs(filename, std::ios::binary);
+        if (!ifs)
+            return false;
+
+        // Read and verify magic
+        char magic[5] = {0};
+        ifs.read(magic, 4);
+        if (std::string(magic) != "PIX1")
+            return false;
+
+        auto read32 = [&]() -> u32
+        {
+            char bytes[4];
+            ifs.read(bytes, 4);
+            if (ifs.gcount() != 4)
+                return 0;
+            return (u32)((bytes[0] << 0) | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
+        };
+
+        u32 w = read32(), h = read32();
+        u32 fcount = read32();
+
+        // Validate dimensions
+        if (w == 0 || h == 0 || w > 2048 || h > 2048 || fcount > 1000)
+        {
+            std::cerr << "Invalid file format or dimensions too large!" << std::endl;
+            return false;
+        }
+
+        frames.clear();
+        frameHistories.clear();
+        width = w;
+        height = h;
+
+        for (u32 fi = 0; fi < fcount; ++fi)
+        {
+            u32 nameLen = read32();
+            if (nameLen > 1000)
+            { // Sanity check
+                std::cerr << "Invalid frame name length!" << std::endl;
+                return false;
+            }
+
+            std::string name(nameLen, '\0');
+            ifs.read(&name[0], nameLen);
+
+            Frame f(width, height, name);
+
+            // Read pixel data
+            std::vector<sf::Uint8> pixels(width * height * 4);
+            ifs.read((char *)pixels.data(), pixels.size());
+
+            if (ifs.gcount() != (std::streamsize)pixels.size())
+            {
+                std::cerr << "Failed to read pixel data for frame " << fi << std::endl;
+                return false;
+            }
+
+            // Create image from pixel data
+            f.image.create(width, height, pixels.data());
+            f.updateThumbnail();
+            frames.push_back(std::move(f));
+            frameHistories.push_back(FrameHistory());
+        }
+
+        currentFrame = 0;
+        eraserSize = 1;             // Reset eraser size
+        currentFilename = filename; // NEW: Update current filename
+        return true;
+    }
+
+    // Export current frame or all frames as PNGs
+    bool exportCurrentFramePNG(const std::string &filename) const
+    {
+        if (frames.empty() || currentFrame < 0 || currentFrame >= (int)frames.size())
+        {
+            return false;
+        }
+        sf::Image img = frames[currentFrame].image;
+        return img.saveToFile(filename);
+    }
+
+    bool exportAllFramesPNG(const std::string &basename) const
+    {
+        for (size_t i = 0; i < frames.size(); ++i)
+        {
+            std::ostringstream oss;
+            oss << basename << "_" << i << ".png";
+            if (!frames[i].image.saveToFile(oss.str()))
+                return false;
+        }
+        return true;
+    }
+
 private:
+    std::vector<FrameHistory> frameHistories;
+
+    void pushDrawAction(int frameIndex, const std::vector<std::pair<sf::Vector2i, sf::Color>> &changedPixels)
+    {
+        if (frameIndex < 0 || frameIndex >= (int)frameHistories.size())
+            return;
+
+        auto &history = frameHistories[frameIndex];
+
+        // Clear redo stack when new action is performed
+        history.redoStack.clear();
+
+        // Add to undo stack
+        Action action(Action::Draw); // Use new constructor
+        action.pixels = changedPixels;
+        history.undoStack.push_back(action);
+
+        // Limit history size
+        if (history.undoStack.size() > history.MAX_HISTORY)
+        {
+            history.undoStack.erase(history.undoStack.begin());
+        }
+    }
+
+    void pushFillAction(int frameIndex, const sf::Vector2i &pos, const sf::Color &oldColor, const sf::Color &newColor)
+    {
+        if (frameIndex < 0 || frameIndex >= (int)frameHistories.size())
+            return;
+
+        auto &history = frameHistories[frameIndex];
+        history.redoStack.clear();
+
+        Action action(Action::Fill); // Use new constructor
+        action.fillPos = pos;
+        action.newColor = newColor;
+        // Store the old color at the fill position
+        action.pixels.push_back({pos, oldColor});
+        history.undoStack.push_back(action);
+
+        if (history.undoStack.size() > history.MAX_HISTORY)
+        {
+            history.undoStack.erase(history.undoStack.begin());
+        }
+    }
     bool exportGodotSpriteSheet(const std::string &imagePath, const std::string &resourcePath) const
     {
         // Export single frame as PNG
@@ -1355,241 +1814,156 @@ private:
 
         return true;
     }
-
-public:
-    // Save and load .pix custom format
-    bool saveToPix(const std::string &filename)
-    {
-        std::ofstream ofs(filename, std::ios::binary);
-        if (!ofs)
-            return false;
-
-        // Write header
-        ofs.write("PIX1", 4); // magic
-
-        auto write32 = [&](u32 v)
-        {
-            char bytes[4];
-            bytes[0] = (v >> 0) & 0xFF;
-            bytes[1] = (v >> 8) & 0xFF;
-            bytes[2] = (v >> 16) & 0xFF;
-            bytes[3] = (v >> 24) & 0xFF;
-            ofs.write(bytes, 4);
-        };
-
-        write32(width);
-        write32(height);
-        write32((u32)frames.size());
-
-        for (const Frame &f : frames)
-        {
-            // Write frame name
-            u32 nameLen = (u32)f.name.size();
-            write32(nameLen);
-            ofs.write(f.name.c_str(), nameLen);
-
-            // Write frame pixels (RGBA)
-            const sf::Image &img = f.image;
-            auto size = img.getSize();
-
-            // Convert pixels to byte array
-            std::vector<sf::Uint8> pixels(size.x * size.y * 4);
-            for (unsigned y = 0; y < size.y; ++y)
-            {
-                for (unsigned x = 0; x < size.x; ++x)
-                {
-                    sf::Color pixel = img.getPixel(x, y);
-                    unsigned index = (y * size.x + x) * 4;
-                    pixels[index] = pixel.r;
-                    pixels[index + 1] = pixel.g;
-                    pixels[index + 2] = pixel.b;
-                    pixels[index + 3] = pixel.a;
-                }
-            }
-
-            ofs.write((char *)pixels.data(), pixels.size());
-        }
-
-        currentFilename = filename; // NEW: Update current filename
-        return true;
-    }
-    bool loadFromPix(const std::string &filename)
-    {
-        std::ifstream ifs(filename, std::ios::binary);
-        if (!ifs)
-            return false;
-
-        // Read and verify magic
-        char magic[5] = {0};
-        ifs.read(magic, 4);
-        if (std::string(magic) != "PIX1")
-            return false;
-
-        auto read32 = [&]() -> u32
-        {
-            char bytes[4];
-            ifs.read(bytes, 4);
-            if (ifs.gcount() != 4)
-                return 0;
-            return (u32)((bytes[0] << 0) | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24));
-        };
-
-        u32 w = read32(), h = read32();
-        u32 fcount = read32();
-
-        // Validate dimensions
-        if (w == 0 || h == 0 || w > 2048 || h > 2048 || fcount > 1000)
-        {
-            std::cerr << "Invalid file format or dimensions too large!" << std::endl;
-            return false;
-        }
-
-        frames.clear();
-        width = w;
-        height = h;
-
-        for (u32 fi = 0; fi < fcount; ++fi)
-        {
-            u32 nameLen = read32();
-            if (nameLen > 1000)
-            { // Sanity check
-                std::cerr << "Invalid frame name length!" << std::endl;
-                return false;
-            }
-
-            std::string name(nameLen, '\0');
-            ifs.read(&name[0], nameLen);
-
-            Frame f(width, height, name);
-
-            // Read pixel data
-            std::vector<sf::Uint8> pixels(width * height * 4);
-            ifs.read((char *)pixels.data(), pixels.size());
-
-            if (ifs.gcount() != (std::streamsize)pixels.size())
-            {
-                std::cerr << "Failed to read pixel data for frame " << fi << std::endl;
-                return false;
-            }
-
-            // Create image from pixel data
-            f.image.create(width, height, pixels.data());
-            f.updateThumbnail();
-            frames.push_back(std::move(f));
-        }
-
-        currentFrame = 0;
-        eraserSize = 1;             // Reset eraser size
-        currentFilename = filename; // NEW: Update current filename
-        return true;
-    }
-    // Export current frame or all frames as PNGs
-    bool exportCurrentFramePNG(const std::string &filename) const
-    {
-        if (frames.empty() || currentFrame < 0 || currentFrame >= (int)frames.size())
-        {
-            return false;
-        }
-        sf::Image img = frames[currentFrame].image;
-        return img.saveToFile(filename);
-    }
-
-    bool exportAllFramesPNG(const std::string &basename) const
-    {
-        for (size_t i = 0; i < frames.size(); ++i)
-        {
-            std::ostringstream oss;
-            oss << basename << "_" << i << ".png";
-            if (!frames[i].image.saveToFile(oss.str()))
-                return false;
-        }
-        return true;
-    }
 };
-
-class ColorPicker
+class ColorWheel
 {
 public:
     bool isOpen = false;
     sf::Vector2f position{100, 100};
-    sf::Vector2f size{200, 200};
-    Color currentColor{255, 0, 0};
+    sf::Vector2f size{300, 350};
+    Color currentColor{255, 0, 0, 255};
+    sf::Image wheelImage;
+    sf::Texture wheelTexture;
+    bool needsUpdate = true;
+
+    ColorWheel()
+    {
+        wheelImage.create(256, 256, sf::Color::White);
+        updateWheel();
+    }
+
+    void updateWheel()
+    {
+        if (!needsUpdate)
+            return;
+
+        int centerX = 128;
+        int centerY = 128;
+        int radius = 120;
+
+        for (int y = 0; y < 256; y++)
+        {
+            for (int x = 0; x < 256; x++)
+            {
+                int dx = x - centerX;
+                int dy = y - centerY;
+                float distance = std::sqrt(dx * dx + dy * dy);
+
+                if (distance <= radius)
+                {
+                    float angle = std::atan2(dy, dx);
+                    if (angle < 0)
+                        angle += 2 * M_PI;
+
+                    float hue = angle / (2 * M_PI);
+                    float saturation = distance / radius;
+                    float value = 1.0f;
+
+                    // HSV to RGB conversion
+                    int hi = static_cast<int>(hue * 6);
+                    float f = hue * 6 - hi;
+                    float p = value * (1 - saturation);
+                    float q = value * (1 - f * saturation);
+                    float t = value * (1 - (1 - f) * saturation);
+
+                    float r, g, b;
+                    switch (hi)
+                    {
+                    case 0:
+                        r = value;
+                        g = t;
+                        b = p;
+                        break;
+                    case 1:
+                        r = q;
+                        g = value;
+                        b = p;
+                        break;
+                    case 2:
+                        r = p;
+                        g = value;
+                        b = t;
+                        break;
+                    case 3:
+                        r = p;
+                        g = q;
+                        b = value;
+                        break;
+                    case 4:
+                        r = t;
+                        g = p;
+                        b = value;
+                        break;
+                    case 5:
+                        r = value;
+                        g = p;
+                        b = q;
+                        break;
+                    default:
+                        r = g = b = 0;
+                        break;
+                    }
+
+                    wheelImage.setPixel(x, y, sf::Color(static_cast<sf::Uint8>(r * 255), static_cast<sf::Uint8>(g * 255), static_cast<sf::Uint8>(b * 255)));
+                }
+                else
+                {
+                    wheelImage.setPixel(x, y, sf::Color::Transparent);
+                }
+            }
+        }
+
+        wheelTexture.loadFromImage(wheelImage);
+        needsUpdate = false;
+    }
 
     void draw(sf::RenderWindow &window, sf::Font &font)
     {
         if (!isOpen)
             return;
 
+        updateWheel();
+
         // Background with 8-bit style
         sf::RectangleShape bg(size);
         bg.setPosition(position);
-        bg.setFillColor(sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b));
-        bg.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+        bg.setFillColor(sf::Color(40, 40, 80));     // Dark blue-purple
+        bg.setOutlineColor(sf::Color(255, 255, 0)); // Yellow
         bg.setOutlineThickness(2);
         window.draw(bg);
 
-        // Title with 8-bit font style
-        sf::Text title("8-BIT COLOR PICKER", font, 14);
-        title.setPosition(position.x + 10, position.y + 5);
-        title.setFillColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+        // Title
+        sf::Text title("COLOR", font, 16);
         title.setStyle(sf::Text::Bold);
+        title.setPosition(position.x + 10, position.y + 10);
+        title.setFillColor(sf::Color(255, 255, 0)); // Yellow
         window.draw(title);
 
-        // Draw 8-bit color palette squares (4x4 grid)
-        float cellSize = 30;
-        float startX = position.x + 10;
-        float startY = position.y + 30;
+        // Draw color wheel
+        sf::Sprite wheelSprite(wheelTexture);
+        wheelSprite.setPosition(position.x + (size.x - 256) / 2, position.y + 40);
+        window.draw(wheelSprite);
 
-        for (int i = 0; i < 16; ++i)
-        {
-            int row = i / 4;
-            int col = i % 4;
-
-            sf::RectangleShape colorRect({cellSize, cellSize});
-            colorRect.setPosition(startX + col * (cellSize + 5), startY + row * (cellSize + 5));
-            colorRect.setFillColor(sf::Color(
-                EightBitColors::Palette[i].r,
-                EightBitColors::Palette[i].g,
-                EightBitColors::Palette[i].b));
-            colorRect.setOutlineColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
-            colorRect.setOutlineThickness(1);
-            window.draw(colorRect);
-
-            // Highlight selected color
-            if (currentColor.r == EightBitColors::Palette[i].r &&
-                currentColor.g == EightBitColors::Palette[i].g &&
-                currentColor.b == EightBitColors::Palette[i].b)
-            {
-                sf::RectangleShape highlight({cellSize + 4, cellSize + 4});
-                highlight.setPosition(startX + col * (cellSize + 5) - 2, startY + row * (cellSize + 5) - 2);
-                highlight.setFillColor(sf::Color::Transparent);
-                highlight.setOutlineColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
-                highlight.setOutlineThickness(2);
-                window.draw(highlight);
-            }
-        }
-
-        // Current color preview with 8-bit style
-        sf::RectangleShape preview({60, 40});
-        preview.setPosition(position.x + size.x - 70, position.y + size.y - 50);
+        // Current color preview
+        sf::RectangleShape preview({80, 60});
+        preview.setPosition(position.x + size.x - 90, position.y + 40);
         preview.setFillColor(sf::Color(currentColor.r, currentColor.g, currentColor.b));
-        preview.setOutlineColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+        preview.setOutlineColor(sf::Color::White);
         preview.setOutlineThickness(2);
         window.draw(preview);
 
-        // Close button with 8-bit style
-        sf::RectangleShape closeBtn({70, 25});
-        closeBtn.setPosition(position.x + size.x - 80, position.y + size.y - 25);
-        closeBtn.setFillColor(sf::Color(EightBitColors::Red.r, EightBitColors::Red.g, EightBitColors::Red.b));
-        closeBtn.setOutlineColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
-        closeBtn.setOutlineThickness(1);
-        window.draw(closeBtn);
+        // RGB values
+        sf::Text rgbText("RGB: " + std::to_string(currentColor.r) + ", " +
+                             std::to_string(currentColor.g) + ", " +
+                             std::to_string(currentColor.b),
+                         font, 12);
+        rgbText.setPosition(position.x + size.x - 90, position.y + 110);
+        rgbText.setFillColor(sf::Color::White);
+        window.draw(rgbText);
 
-        sf::Text closeText("CLOSE", font, 12);
-        closeText.setPosition(closeBtn.getPosition().x + 10, closeBtn.getPosition().y + 5);
-        closeText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
-        closeText.setStyle(sf::Text::Bold);
-        window.draw(closeText);
+        // Close button
+        drawButton(window, sf::FloatRect(position.x + size.x - 90, position.y + size.y - 35, 80, 25),
+                   font, "CLOSE", false, false);
     }
 
     bool handleClick(sf::Vector2i mousePos, Color &targetColor)
@@ -1597,32 +1971,27 @@ public:
         if (!isOpen)
             return false;
 
-        // Check color palette clicks
-        float cellSize = 30;
-        float startX = position.x + 10;
-        float startY = position.y + 30;
-
-        for (int i = 0; i < 16; ++i)
+        // Check color wheel clicks
+        sf::FloatRect wheelRect(position.x + (size.x - 256) / 2, position.y + 40, 256, 256);
+        if (wheelRect.contains((float)mousePos.x, (float)mousePos.y))
         {
-            int row = i / 4;
-            int col = i % 4;
+            int localX = mousePos.x - wheelRect.left;
+            int localY = mousePos.y - wheelRect.top;
 
-            sf::FloatRect colorRect(
-                startX + col * (cellSize + 5),
-                startY + row * (cellSize + 5),
-                cellSize,
-                cellSize);
-
-            if (colorRect.contains((float)mousePos.x, (float)mousePos.y))
+            if (localX >= 0 && localX < 256 && localY >= 0 && localY < 256)
             {
-                currentColor = EightBitColors::Palette[i];
-                targetColor = currentColor;
-                return true;
+                sf::Color pixel = wheelImage.getPixel(localX, localY);
+                if (pixel.a > 0) // Not transparent
+                {
+                    currentColor = Color(pixel.r, pixel.g, pixel.b);
+                    targetColor = currentColor;
+                    return true;
+                }
             }
         }
 
         // Check close button
-        sf::FloatRect closeBtn(position.x + size.x - 80, position.y + size.y - 25, 70, 25);
+        sf::FloatRect closeBtn(position.x + size.x - 90, position.y + size.y - 35, 80, 25);
         if (closeBtn.contains((float)mousePos.x, (float)mousePos.y))
         {
             isOpen = false;
@@ -1631,47 +2000,83 @@ public:
 
         return false;
     }
+
+private:
+    void drawButton(sf::RenderWindow &w, const sf::FloatRect &rect, const sf::Font &font,
+                    const std::string &label, bool isActive, bool isHovered)
+    {
+        sf::Color bgColor = isActive ? sf::Color(0, 0, 255) : sf::Color(128, 0, 128);
+        if (isHovered && !isActive)
+            bgColor = sf::Color(0, 0, 168);
+
+        sf::RectangleShape rs({rect.width, rect.height});
+        rs.setPosition(rect.left, rect.top);
+        rs.setFillColor(bgColor);
+        rs.setOutlineColor(isActive ? sf::Color(255, 255, 0) : sf::Color(170, 170, 170));
+        rs.setOutlineThickness(2);
+        w.draw(rs);
+
+        sf::Text t(label, font, 12);
+        t.setStyle(sf::Text::Bold);
+        sf::FloatRect textBounds = t.getLocalBounds();
+        t.setPosition(rect.left + (rect.width - textBounds.width) / 2,
+                      rect.top + (rect.height - textBounds.height) / 2 - 2);
+        t.setFillColor(sf::Color::White);
+        w.draw(t);
+    }
 };
 
-// Utility: draw a rectangle button with 8-bit style
 void drawButton(sf::RenderWindow &w, const sf::FloatRect &rect, const sf::Font &font,
                 const std::string &label, bool isActive = false, bool isHovered = false)
 {
-    // 8-bit button style
-    sf::Color bgColor = isActive ? sf::Color(EightBitColors::Blue.r, EightBitColors::Blue.g, EightBitColors::Blue.b) : sf::Color(EightBitColors::DarkPurple.r, EightBitColors::DarkPurple.g, EightBitColors::DarkPurple.b);
-
-    if (isHovered && !isActive)
-    {
-        bgColor = sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b);
-    }
+    // Improved button colors with better contrast
+    sf::Color bgColor = isActive ? sf::Color(0, 0, 255) : // Blue when active
+                            isHovered ? sf::Color(0, 0, 168)
+                                      :             // Dark blue when hovered
+                            sf::Color(128, 0, 128); // Purple by default
 
     sf::RectangleShape rs({rect.width, rect.height});
     rs.setPosition(rect.left, rect.top);
     rs.setFillColor(bgColor);
-    rs.setOutlineColor(isActive ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
+    rs.setOutlineColor(isActive ? sf::Color(255, 255, 0) : // Yellow border when active
+                           sf::Color(200, 200, 200));      // Light gray otherwise
     rs.setOutlineThickness(2);
     w.draw(rs);
 
-    // 8-bit text style
+    // 8-bit text style with shadow for better readability
     sf::Text t(label, font, 12);
     t.setStyle(sf::Text::Bold);
     sf::FloatRect textBounds = t.getLocalBounds();
     t.setPosition(rect.left + (rect.width - textBounds.width) / 2,
                   rect.top + (rect.height - textBounds.height) / 2 - 2);
-    t.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+    t.setFillColor(sf::Color::White);
     w.draw(t);
 }
-
-// Draw 8-bit style panel
+// Draw 8-bit style panel with gradient effect
 void drawPanel(sf::RenderWindow &w, const sf::FloatRect &rect, const std::string &title = "", const sf::Font &font = sf::Font())
 {
-    // Main panel
+    // Main panel with gradient-like effect using multiple rectangles
     sf::RectangleShape panel({rect.width, rect.height});
     panel.setPosition(rect.left, rect.top);
-    panel.setFillColor(sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b));
-    panel.setOutlineColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
+    panel.setFillColor(sf::Color(40, 40, 80)); // Dark blue-purple base
+
+    // Top highlight
+    sf::RectangleShape topHighlight({rect.width, 2});
+    topHighlight.setPosition(rect.left, rect.top);
+    topHighlight.setFillColor(sf::Color(100, 100, 200));
+
+    // Bottom shadow
+    sf::RectangleShape bottomShadow({rect.width, 2});
+    bottomShadow.setPosition(rect.left, rect.top + rect.height - 2);
+    bottomShadow.setFillColor(sf::Color(20, 20, 60));
+
+    // Border
+    panel.setOutlineColor(sf::Color(170, 170, 170)); // Light gray
     panel.setOutlineThickness(2);
+
     w.draw(panel);
+    w.draw(topHighlight);
+    w.draw(bottomShadow);
 
     // Title if provided
     if (!title.empty() && font.getInfo().family != "")
@@ -1679,17 +2084,20 @@ void drawPanel(sf::RenderWindow &w, const sf::FloatRect &rect, const std::string
         sf::Text titleText(title, font, 14);
         titleText.setStyle(sf::Text::Bold);
         titleText.setPosition(rect.left + 10, rect.top + 5);
-        titleText.setFillColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+        titleText.setFillColor(sf::Color(255, 255, 0)); // Yellow
         w.draw(titleText);
     }
 }
-
 int main()
 {
     // NEW: GIF export variables
     std::string gifWidthStr = std::to_string(64);
     std::string gifHeightStr = std::to_string(64);
     std::string gifDelayStr = "5";
+
+    bool ctrlPressed = false;
+    bool undoPressed = false;
+    bool redoPressed = false;
 
     bool gifWidthInputActive = false;
     bool gifHeightInputActive = false;
@@ -1731,8 +2139,7 @@ int main()
     float fps = 6.0f;
     float playTimer = 0.f;
 
-    // Color picker
-    ColorPicker colorPicker;
+    ColorWheel colorWheel;
 
     // Canvas resize dialog
     bool showResizeDialog = false;
@@ -1888,12 +2295,13 @@ int main()
                                     exportStatusTimer = 3.0f;
                                 }
                             }
-                            else if (fileBrowser.title.find("Save Project As") != std::string::npos)
+
+                            else if (fileBrowser.title.find("Save Project As") != std::string::npos) // === ADD THIS NEW CASE ===
                             {
-                                // Save Project operation
+                                // Save Project As operation
                                 if (canvas.saveProjectAs(fullPath))
                                 {
-                                    exportStatus = "Saved " + fullPath;
+                                    exportStatus = "Saved as " + fullPath;
                                     exportStatusTimer = 3.0f;
                                 }
                                 else
@@ -1939,6 +2347,14 @@ int main()
                         if (canvas.zoom > 64.0f)
                             canvas.zoom = 64.0f;
                     }
+                    else if (ev.type == sf::Event::KeyReleased)
+                    {
+                        if (ev.key.code == sf::Keyboard::LControl || ev.key.code == sf::Keyboard::RControl)
+                        {
+                            ctrlPressed = false;
+                        }
+                    }
+
                     else if (ev.type == sf::Event::MouseButtonPressed)
                     {
                         if (ev.mouseButton.button == sf::Mouse::Left)
@@ -1969,6 +2385,23 @@ int main()
                         {
                             canvas.newProject(64, 64);
                         }
+                        if (ctrl && ev.key.code == sf::Keyboard::Z)
+                        {
+                            if (canvas.undo())
+                            {
+                                // Successfully performed undo
+                            }
+                            undoPressed = true;
+                        }
+                        else if (ctrl && ev.key.code == sf::Keyboard::Y)
+                        {
+                            if (canvas.redo())
+                            {
+                                // Successfully performed redo
+                            }
+                            redoPressed = true;
+                        }
+
                         else if (ctrl && ev.key.code == sf::Keyboard::S)
                         {
                             // Quick save with current filename
@@ -1995,16 +2428,7 @@ int main()
                                 }
                             }
                         }
-                        else if (ctrl && ev.key.shift && ev.key.code == sf::Keyboard::S)
-                        {
-                            // Save As
-                            fileBrowser.isOpen = true;
-                            fileBrowser.title = "Save Project As";
-                            fileBrowser.defaultExtension = ".pix";
-                            fileBrowser.allowedExtensions = {".pix"};
-                            fileBrowser.filenameInput = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
-                            fileBrowser.filenameInputActive = true;
-                        }
+
                         else if (ev.key.code == sf::Keyboard::Space)
                         {
                             playing = !playing;
@@ -2174,9 +2598,9 @@ int main()
                             {
                                 showOpenDialog = false;
                             }
-                            else if (colorPicker.isOpen)
+                            else if (colorWheel.isOpen)
                             {
-                                colorPicker.isOpen = false;
+                                colorWheel.isOpen = false;
                             }
                             else if (fileBrowser.isOpen)
                             {
@@ -2301,17 +2725,17 @@ int main()
                 lastMouse = cur;
             }
 
-            // Handle color picker clicks - ONLY on mouse press, not hold
+            // Handle color wheel clicks - ONLY on mouse press, not hold
             if (leftMousePressedThisFrame && !uiElementClicked && !fileBrowser.isOpen)
             {
-                if (colorPicker.handleClick(mpos, canvas.drawColor))
+                if (colorWheel.handleClick(mpos, canvas.drawColor))
                 {
                     uiElementClicked = true;
                 }
             }
 
             // Drawing: convert mouse to pixel coords
-            if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
+            if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorWheel.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
             {
                 // map mouse to canvas pixel position
                 float localX = (mpos.x - canvasArea.left - canvas.pan.x) / canvas.zoom;
@@ -2357,9 +2781,8 @@ int main()
                 }
             }
 
-            // --- Rendering with 8-bit style ---
-            window.clear(sf::Color(EightBitColors::DarkPurple.r, EightBitColors::DarkPurple.g, EightBitColors::DarkPurple.b));
-
+            // Use a darker, more consistent background color
+            window.clear(sf::Color(60, 40, 100)); // Purple-blue background
             // Draw main panels with 8-bit style
             drawPanel(window, sf::FloatRect(4, 4, (float)winSize.x - sidebarW - 8, toolbarH - 4), "TOOLS", font);
             drawPanel(window, sf::FloatRect(canvasArea.left - 4, canvasArea.top - 4, canvasArea.width + 8, canvasArea.height + 8), "CANVAS", font);
@@ -2371,7 +2794,7 @@ int main()
             float bw = 64, bh = 32, spacing = 6;
 
             // Check hover states for tool buttons
-            if (!uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
+            if (!uiElementClicked && !colorWheel.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
             {
                 // Pencil button hover
                 if (mpos.x >= (int)x && mpos.x <= (int)(x + bw) && mpos.y >= (int)y && mpos.y <= (int)(y + bh))
@@ -2432,13 +2855,13 @@ int main()
             colPreview.setOutlineThickness(2);
             window.draw(colPreview);
 
-            // Color picker button
-            bool colorBtnHovered = (mpos.x >= (int)(colorX + 40) && mpos.x <= (int)(colorX + 40 + 60) &&
+            // Color wheel button
+            bool colorBtnHovered = (mpos.x >= (int)(colorX + 40) && mpos.x <= (int)(colorX + 40 + 80) &&
                                     mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 40, y, 60, bh), font, "COLORS", false, colorBtnHovered);
+            drawButton(window, sf::FloatRect(colorX + 40, y, 80, bh), font, "COLOR", false, colorBtnHovered);
             if (leftMousePressedThisFrame && colorBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
-                colorPicker.isOpen = !colorPicker.isOpen;
+                colorWheel.isOpen = !colorWheel.isOpen;
                 uiElementClicked = true;
             }
 
@@ -2468,11 +2891,43 @@ int main()
                 uiElementClicked = true;
             }
 
-            // Save As button
-            bool saveBtnHovered = (mpos.x >= (int)(colorX + 290) && mpos.x <= (int)(colorX + 290 + 80) &&
+            // Save button - placed after Open button
+            bool saveBtnHovered = (mpos.x >= (int)(colorX + 460) && mpos.x <= (int)(colorX + 460 + 80) &&
                                    mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 290, y, 80, bh), font, "SAVE AS", false, saveBtnHovered);
+            drawButton(window, sf::FloatRect(colorX + 460, y, 80, bh), font, "SAVE", false, saveBtnHovered);
             if (leftMousePressedThisFrame && saveBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
+            {
+                if (canvas.currentFilename.empty())
+                {
+                    // No filename yet, show Save As dialog
+                    fileBrowser.isOpen = true;
+                    fileBrowser.title = "Save Project As";
+                    fileBrowser.defaultExtension = ".pix";
+                    fileBrowser.allowedExtensions = {".pix"};
+                    fileBrowser.filenameInput = "project.pix";
+                    fileBrowser.filenameInputActive = true;
+                }
+                else
+                {
+                    // Save to current file
+                    if (canvas.saveProject())
+                    {
+                        exportStatus = "Saved " + canvas.currentFilename;
+                        exportStatusTimer = 3.0f;
+                    }
+                    else
+                    {
+                        exportStatus = "Failed to save " + canvas.currentFilename;
+                        exportStatusTimer = 3.0f;
+                    }
+                }
+                uiElementClicked = true;
+            }
+            // Save As button - placed after Save button
+            bool saveAsBtnHovered = (mpos.x >= (int)(colorX + 540) && mpos.x <= (int)(colorX + 540 + 80) &&
+                                     mpos.y >= (int)y && mpos.y <= (int)(y + bh));
+            drawButton(window, sf::FloatRect(colorX + 540, y, 80, bh), font, "SAVE AS", false, saveAsBtnHovered);
+            if (leftMousePressedThisFrame && saveAsBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 fileBrowser.isOpen = true;
                 fileBrowser.title = "Save Project As";
@@ -2480,9 +2935,8 @@ int main()
                 fileBrowser.allowedExtensions = {".pix"};
                 fileBrowser.filenameInput = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
                 fileBrowser.filenameInputActive = true;
-                // Don't set uiElementClicked = true here!
+                uiElementClicked = true;
             }
-
             // Open button
             bool openBtnHovered = (mpos.x >= (int)(colorX + 380) && mpos.x <= (int)(colorX + 380 + 80) &&
                                    mpos.y >= (int)y && mpos.y <= (int)(y + bh));
@@ -2785,8 +3239,8 @@ int main()
                 fileBrowser.filenameInputActive = true;
                 // Don't set uiElementClicked = true here!
             }
-            // Draw color picker if open
-            colorPicker.draw(window, font);
+            // Draw color wheel if open
+            colorWheel.draw(window, font);
 
             // Draw file browser if open
             if (fileBrowser.isOpen)
@@ -3201,12 +3655,15 @@ int main()
                 window.draw(statusText);
             }
 
-            // Small status text with 8-bit style
+            // Update the status text to show undo/redo info
             std::string toolName = canvas.currentTool == Tool::Pencil ? "PENCIL" : canvas.currentTool == Tool::Eraser ? "ERASER"
                                                                                                                       : "FILL";
+            std::string undoStatus = " | UNDO: " + std::string(canvas.canUndo() ? "READY" : "UNAVAILABLE") +
+                                     " | REDO: " + std::string(canvas.canRedo() ? "READY" : "UNAVAILABLE");
             sf::Text status("TOOL: " + toolName + "  FRAME: " + std::to_string(canvas.currentFrame) +
                                 "  ZOOM: " + std::to_string((int)canvas.zoom) + "x" +
-                                (canvas.currentTool == Tool::Eraser ? "  ERASER SIZE: " + std::to_string(canvas.eraserSize) : ""),
+                                (canvas.currentTool == Tool::Eraser ? "  ERASER SIZE: " + std::to_string(canvas.eraserSize) : "") +
+                                undoStatus,
                             font, 12);
             status.setStyle(sf::Text::Bold);
             status.setPosition(8, winSize.y - 22);
