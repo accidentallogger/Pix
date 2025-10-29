@@ -16,6 +16,17 @@
 #include <atomic>
 #include <sys/stat.h> // For directory creation
 
+#ifdef _WIN32
+#include <windows.h>
+#include <direct.h>
+#define getcwd _getcwd
+#else
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#endif
+
 using u8 = sf::Uint8;
 using u32 = uint32_t;
 
@@ -64,7 +75,6 @@ namespace EightBitColors
 }
 
 // Simple GIF encoder (minimal implementation)
-// Fixed GIF encoder implementation
 class SimpleGIFEncoder
 {
 private:
@@ -307,6 +317,7 @@ public:
         return true;
     }
 };
+
 struct Frame
 {
     std::string name = "Frame";
@@ -316,12 +327,10 @@ struct Frame
     Frame() {}
     Frame(unsigned w, unsigned h, const std::string &n = "Frame") : name(n)
     {
-        // SFML's create returns void, not bool - just call it directly
         image.create(w, h, sf::Color(0, 0, 0, 0));
         updateThumbnail();
     }
 
-    // Rule of Five: Add proper copy/move semantics to prevent memory issues
     Frame(const Frame &other) : name(other.name)
     {
         if (other.image.getSize().x > 0 && other.image.getSize().y > 0)
@@ -374,10 +383,7 @@ struct Frame
 
     void updateThumbnail()
     {
-        // Create a thumbnail (scaled down version)
         unsigned thumbSize = 48;
-
-        // Check if image is valid
         auto size = image.getSize();
         if (size.x == 0 || size.y == 0)
         {
@@ -400,7 +406,6 @@ struct Frame
             }
         }
 
-        // Just try to load the thumbnail, don't check return value
         thumbnail.loadFromImage(thumbImg);
     }
 };
@@ -410,6 +415,478 @@ enum class Tool
     Pencil,
     Eraser,
     Fill
+};
+
+// NEW: File Browser Class
+class FileBrowser
+{
+public:
+    bool isOpen = false;
+    std::string currentPath;
+    std::vector<std::string> files;
+    std::vector<std::string> directories;
+    std::string selectedFile;
+    std::string filenameInput;
+    bool filenameInputActive = false;
+    std::string title;
+    std::string defaultExtension;
+    std::vector<std::string> allowedExtensions;
+
+    FileBrowser()
+    {
+#ifdef _WIN32
+        currentPath = "C:\\";
+#else
+        char cwd[1024];
+        if (getcwd(cwd, sizeof(cwd)) != NULL)
+        {
+            currentPath = cwd;
+        }
+        else
+        {
+            currentPath = "/";
+        }
+#endif
+        refresh();
+    }
+
+    void refresh()
+    {
+        files.clear();
+        directories.clear();
+
+#ifdef _WIN32
+        // Windows implementation
+        std::string searchPath = currentPath + "\\*";
+        WIN32_FIND_DATAA findData;
+        HANDLE hFind = FindFirstFileA(searchPath.c_str(), &findData);
+
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                std::string name = findData.cFileName;
+                if (name == "." || name == "..")
+                    continue;
+
+                if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+                {
+                    directories.push_back(name + "\\");
+                }
+                else
+                {
+                    files.push_back(name);
+                }
+            } while (FindNextFileA(hFind, &findData));
+            FindClose(hFind);
+        }
+#else
+        // Linux/Mac implementation
+        DIR *dir = opendir(currentPath.c_str());
+        if (dir)
+        {
+            struct dirent *entry;
+            while ((entry = readdir(dir)) != NULL)
+            {
+                std::string name = entry->d_name;
+                if (name == "." || name == "..")
+                    continue;
+
+                // Check if it's a directory
+                std::string fullPath = currentPath + "/" + name;
+                struct stat statbuf;
+                if (stat(fullPath.c_str(), &statbuf) == 0)
+                {
+                    if (S_ISDIR(statbuf.st_mode))
+                    {
+                        directories.push_back(name + "/");
+                    }
+                    else
+                    {
+                        files.push_back(name);
+                    }
+                }
+            }
+            closedir(dir);
+        }
+#endif
+
+        // Sort directories and files
+        std::sort(directories.begin(), directories.end());
+        std::sort(files.begin(), files.end());
+    }
+
+    void goUp()
+    {
+#ifdef _WIN32
+        size_t pos = currentPath.find_last_of("\\");
+        if (pos != std::string::npos && pos > 2) // Keep at least "C:\"
+        {
+            currentPath = currentPath.substr(0, pos);
+            if (currentPath.size() == 2)
+                currentPath += "\\"; // Ensure "C:" becomes "C:\"
+        }
+#else
+        size_t pos = currentPath.find_last_of("/");
+        if (pos != std::string::npos && pos > 0)
+        {
+            currentPath = currentPath.substr(0, pos);
+        }
+        else
+        {
+            currentPath = "/";
+        }
+#endif
+        refresh();
+        selectedFile.clear();
+    }
+
+    void enterDirectory(const std::string &dirName)
+    {
+#ifdef _WIN32
+        currentPath = currentPath + "\\" + dirName.substr(0, dirName.size() - 1);
+#else
+        currentPath = currentPath + "/" + dirName.substr(0, dirName.size() - 1);
+#endif
+        refresh();
+        selectedFile.clear();
+    }
+
+    bool isAllowedExtension(const std::string &filename) const
+    {
+        if (allowedExtensions.empty())
+            return true;
+
+        size_t dotPos = filename.find_last_of(".");
+        if (dotPos == std::string::npos)
+            return false;
+
+        std::string ext = filename.substr(dotPos);
+        for (const auto &allowed : allowedExtensions)
+        {
+            if (ext == allowed)
+                return true;
+        }
+        return false;
+    }
+
+    void draw(sf::RenderWindow &window, sf::Font &font)
+    {
+        if (!isOpen)
+            return;
+
+        sf::Vector2u winSize = window.getSize();
+        sf::Vector2f dialogSize(600, 400);
+        sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
+
+        // Background
+        sf::RectangleShape bg(dialogSize);
+        bg.setPosition(dialogPos);
+        bg.setFillColor(sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b));
+        bg.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+        bg.setOutlineThickness(2);
+        window.draw(bg);
+
+        // Title
+        sf::Text titleText(title, font, 18);
+        titleText.setStyle(sf::Text::Bold);
+        titleText.setPosition(dialogPos.x + 10, dialogPos.y + 10);
+        titleText.setFillColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+        window.draw(titleText);
+
+        // Current path
+        sf::Text pathText("Path: " + currentPath, font, 12);
+        pathText.setPosition(dialogPos.x + 10, dialogPos.y + 40);
+        pathText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+        window.draw(pathText);
+
+        // File list background
+        sf::RectangleShape listBg({dialogSize.x - 20, 250});
+        listBg.setPosition(dialogPos.x + 10, dialogPos.y + 60);
+        listBg.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+        listBg.setOutlineColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
+        listBg.setOutlineThickness(1);
+        window.draw(listBg);
+
+        // Draw directories and files
+        float listY = dialogPos.y + 65;
+        int maxItems = 15;
+        int itemsDrawn = 0;
+
+        // Up directory button
+        if (itemsDrawn < maxItems)
+        {
+            bool isSelected = (selectedFile == "..");
+            sf::Text dirText("[..]", font, 12);
+            dirText.setPosition(dialogPos.x + 15, listY);
+            dirText.setFillColor(isSelected ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::Blue.r, EightBitColors::Blue.g, EightBitColors::Blue.b));
+            window.draw(dirText);
+            listY += 20;
+            itemsDrawn++;
+        }
+
+        // Directories
+        for (const auto &dir : directories)
+        {
+            if (itemsDrawn >= maxItems)
+                break;
+            bool isSelected = (selectedFile == dir);
+            sf::Text dirText("[" + dir + "]", font, 12);
+            dirText.setPosition(dialogPos.x + 15, listY);
+            dirText.setFillColor(isSelected ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::Blue.r, EightBitColors::Blue.g, EightBitColors::Blue.b));
+            window.draw(dirText);
+            listY += 20;
+            itemsDrawn++;
+        }
+
+        // Files
+        for (const auto &file : files)
+        {
+            if (itemsDrawn >= maxItems)
+                break;
+            if (!allowedExtensions.empty() && !isAllowedExtension(file))
+                continue;
+
+            bool isSelected = (selectedFile == file);
+            sf::Text fileText(file, font, 12);
+            fileText.setPosition(dialogPos.x + 15, listY);
+            fileText.setFillColor(isSelected ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+            window.draw(fileText);
+            listY += 20;
+            itemsDrawn++;
+        }
+
+        // Filename input
+        sf::Text filenameLabel("Filename:", font, 14);
+        filenameLabel.setPosition(dialogPos.x + 10, dialogPos.y + 320);
+        filenameLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+        window.draw(filenameLabel);
+
+        sf::RectangleShape filenameInputBox({400, 25});
+        filenameInputBox.setPosition(dialogPos.x + 80, dialogPos.y + 320);
+        filenameInputBox.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+        filenameInputBox.setOutlineColor(filenameInputActive ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+        filenameInputBox.setOutlineThickness(2);
+        window.draw(filenameInputBox);
+
+        std::string displayText;
+        if (!filenameInput.empty())
+        {
+            displayText = filenameInput;
+        }
+        else if (!selectedFile.empty() && selectedFile != ".." &&
+                 std::find(directories.begin(), directories.end(), selectedFile) == directories.end())
+        {
+            displayText = selectedFile;
+        }
+
+        sf::Text filenameText(displayText, font, 14);
+        filenameText.setPosition(dialogPos.x + 85, dialogPos.y + 325);
+        filenameText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+        window.draw(filenameText);
+
+        // Buttons
+        drawButton(window, sf::FloatRect(dialogPos.x + 490, dialogPos.y + 320, 100, 25), font, "OK", false, false);
+        drawButton(window, sf::FloatRect(dialogPos.x + 490, dialogPos.y + 355, 100, 25), font, "CANCEL", false, false);
+    }
+
+    bool handleEvent(const sf::Event &event, sf::Vector2i mousePos, sf::RenderWindow &window)
+    {
+        if (!isOpen)
+            return false;
+
+        sf::Vector2u winSize = window.getSize();
+        sf::Vector2f dialogSize(600, 400);
+        sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
+
+        if (event.type == sf::Event::MouseButtonPressed && event.mouseButton.button == sf::Mouse::Left)
+        {
+            // Check file list clicks
+            float listStartY = dialogPos.y + 65;
+            float itemHeight = 20;
+
+            // Check ".." directory
+            sf::FloatRect upDirRect(dialogPos.x + 10, listStartY, 580, itemHeight);
+            if (upDirRect.contains((float)mousePos.x, (float)mousePos.y))
+            {
+                selectedFile = "..";
+                filenameInput.clear();
+                return true;
+            }
+
+            // Check directories
+            float currentY = listStartY + itemHeight;
+            for (const auto &dir : directories)
+            {
+                sf::FloatRect dirRect(dialogPos.x + 10, currentY, 580, itemHeight);
+                if (dirRect.contains((float)mousePos.x, (float)mousePos.y))
+                {
+                    selectedFile = dir;
+                    filenameInput.clear();
+                    return true;
+                }
+                currentY += itemHeight;
+            }
+
+            // Check files
+            for (const auto &file : files)
+            {
+                if (!allowedExtensions.empty() && !isAllowedExtension(file))
+                    continue;
+                sf::FloatRect fileRect(dialogPos.x + 10, currentY, 580, itemHeight);
+                if (fileRect.contains((float)mousePos.x, (float)mousePos.y))
+                {
+                    selectedFile = file;
+                    filenameInput = file;
+                    return true;
+                }
+                currentY += itemHeight;
+            }
+
+            // Check filename input
+            sf::FloatRect filenameRect(dialogPos.x + 80, dialogPos.y + 320, 400, 25);
+            if (filenameRect.contains((float)mousePos.x, (float)mousePos.y))
+            {
+                filenameInputActive = true;
+                return true;
+            }
+
+            // Check OK button
+            sf::FloatRect okRect(dialogPos.x + 490, dialogPos.y + 320, 100, 25);
+            if (okRect.contains((float)mousePos.x, (float)mousePos.y))
+            {
+                if (!filenameInput.empty())
+                {
+                    // Add default extension if needed
+                    std::string finalFilename = filenameInput;
+                    if (!defaultExtension.empty() && finalFilename.find('.') == std::string::npos)
+                    {
+                        finalFilename += defaultExtension;
+                    }
+                    selectedFile = finalFilename;
+                    return true; // Dialog will be closed by caller
+                }
+                else if (!selectedFile.empty() && selectedFile != ".." &&
+                         std::find(directories.begin(), directories.end(), selectedFile) == directories.end())
+                {
+                    // Use the selected file if no input was provided
+                    return true;
+                }
+                return true; // Still return true even if no file selected
+            }
+            // Check Cancel button
+            sf::FloatRect cancelRect(dialogPos.x + 490, dialogPos.y + 355, 100, 25);
+            if (cancelRect.contains((float)mousePos.x, (float)mousePos.y))
+            {
+                isOpen = false;
+                selectedFile.clear();
+                return true;
+            }
+
+            // Click outside dialog
+            sf::FloatRect dialogRect(dialogPos.x, dialogPos.y, dialogSize.x, dialogSize.y);
+            if (!dialogRect.contains((float)mousePos.x, (float)mousePos.y))
+            {
+                filenameInputActive = false;
+            }
+        }
+        else if (event.type == sf::Event::KeyPressed)
+        {
+            if (event.key.code == sf::Keyboard::Return)
+            {
+                if (!filenameInput.empty())
+                {
+                    std::string finalFilename = filenameInput;
+                    if (!defaultExtension.empty() && finalFilename.find('.') == std::string::npos)
+                    {
+                        finalFilename += defaultExtension;
+                    }
+                    selectedFile = finalFilename;
+                    return true;
+                }
+            }
+            else if (event.key.code == sf::Keyboard::Escape)
+            {
+                isOpen = false;
+                selectedFile.clear();
+                return true;
+            }
+            else if (event.key.code == sf::Keyboard::BackSpace && filenameInputActive)
+            {
+                if (!filenameInput.empty())
+                {
+                    filenameInput.pop_back();
+                }
+            }
+        }
+        else if (event.type == sf::Event::TextEntered && filenameInputActive)
+        {
+            if (event.text.unicode >= 32 && event.text.unicode < 127)
+            {
+                filenameInput += static_cast<char>(event.text.unicode);
+            }
+        }
+
+        return false;
+    }
+
+    void doubleClick(sf::Vector2i mousePos, sf::RenderWindow &window)
+    {
+        sf::Vector2u winSize = window.getSize();
+        sf::Vector2f dialogSize(600, 400);
+        sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
+
+        float listStartY = dialogPos.y + 65;
+        float itemHeight = 20;
+
+        // Check ".." directory
+        sf::FloatRect upDirRect(dialogPos.x + 10, listStartY, 580, itemHeight);
+        if (upDirRect.contains((float)mousePos.x, (float)mousePos.y))
+        {
+            goUp();
+            return;
+        }
+
+        // Check directories
+        float currentY = listStartY + itemHeight;
+        for (const auto &dir : directories)
+        {
+            sf::FloatRect dirRect(dialogPos.x + 10, currentY, 580, itemHeight);
+            if (dirRect.contains((float)mousePos.x, (float)mousePos.y))
+            {
+                enterDirectory(dir);
+                return;
+            }
+            currentY += itemHeight;
+        }
+    }
+
+private:
+    void drawButton(sf::RenderWindow &w, const sf::FloatRect &rect, const sf::Font &font,
+                    const std::string &label, bool isActive, bool isHovered)
+    {
+        sf::Color bgColor = isActive ? sf::Color(EightBitColors::Blue.r, EightBitColors::Blue.g, EightBitColors::Blue.b) : sf::Color(EightBitColors::DarkPurple.r, EightBitColors::DarkPurple.g, EightBitColors::DarkPurple.b);
+
+        if (isHovered && !isActive)
+        {
+            bgColor = sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b);
+        }
+
+        sf::RectangleShape rs({rect.width, rect.height});
+        rs.setPosition(rect.left, rect.top);
+        rs.setFillColor(bgColor);
+        rs.setOutlineColor(isActive ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
+        rs.setOutlineThickness(2);
+        w.draw(rs);
+
+        sf::Text t(label, font, 12);
+        t.setStyle(sf::Text::Bold);
+        sf::FloatRect textBounds = t.getLocalBounds();
+        t.setPosition(rect.left + (rect.width - textBounds.width) / 2,
+                      rect.top + (rect.height - textBounds.height) / 2 - 2);
+        t.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+        w.draw(t);
+    }
 };
 
 class Canvas
@@ -653,7 +1130,7 @@ public:
         f.updateThumbnail();
     }
 
-    bool exportAsGIF(const std::string &filename, int frameDelay = 5, int scaleFactor = 1) const
+    bool exportAsGIF(const std::string &filename, int frameDelay = 5, int gifWidth = -1, int gifHeight = -1) const
     {
         if (frames.empty())
             return false;
@@ -667,32 +1144,32 @@ public:
                 std::cerr << "Failed to create directory: " << dir << std::endl;
             }
 
-            // Calculate scaled dimensions
-            int scaledWidth = width * scaleFactor;
-            int scaledHeight = height * scaleFactor;
+            // Use provided dimensions or default to canvas size
+            int exportWidth = (gifWidth > 0) ? gifWidth : width;
+            int exportHeight = (gifHeight > 0) ? gifHeight : height;
 
-            SimpleGIFEncoder gif(filename, scaledWidth, scaledHeight, frameDelay);
+            SimpleGIFEncoder gif(filename, exportWidth, exportHeight, frameDelay);
             for (const auto &frame : frames)
             {
-                // Create scaled version of the frame
-                sf::Image scaledImage;
-                scaledImage.create(scaledWidth, scaledHeight, sf::Color(0, 0, 0, 0));
+                // Create scaled version of the frame if dimensions are different
+                sf::Image exportImage;
+                exportImage.create(exportWidth, exportHeight, sf::Color(0, 0, 0, 0));
 
                 // Scale the image using nearest-neighbor for pixel art
-                for (int y = 0; y < scaledHeight; ++y)
+                for (int y = 0; y < exportHeight; ++y)
                 {
-                    for (int x = 0; x < scaledWidth; ++x)
+                    for (int x = 0; x < exportWidth; ++x)
                     {
-                        int srcX = x / scaleFactor;
-                        int srcY = y / scaleFactor;
+                        int srcX = (x * width) / exportWidth;
+                        int srcY = (y * height) / exportHeight;
                         if (srcX < (int)width && srcY < (int)height)
                         {
-                            scaledImage.setPixel(x, y, frame.image.getPixel(srcX, srcY));
+                            exportImage.setPixel(x, y, frame.image.getPixel(srcX, srcY));
                         }
                     }
                 }
 
-                if (!gif.addFrame(scaledImage))
+                if (!gif.addFrame(exportImage))
                 {
                     std::cerr << "Failed to add frame to GIF" << std::endl;
                     return false;
@@ -1210,15 +1687,19 @@ void drawPanel(sf::RenderWindow &w, const sf::FloatRect &rect, const std::string
 int main()
 {
     // NEW: GIF export variables
-    std::string gifSizeStr = "1"; // Default scale factor
+    std::string gifWidthStr = std::to_string(64);
+    std::string gifHeightStr = std::to_string(64);
+    std::string gifDelayStr = "5";
 
-    bool gifSizeInputActive = false;
+    bool gifWidthInputActive = false;
+    bool gifHeightInputActive = false;
     bool gifDelayInputActive = false;
-    int gifSize = 1; // Current scale factor
+
     bool showSaveDialog = false;
     bool showOpenDialog = false;
     std::string saveFilename = "project.pix";
     std::string openFilename = "project.pix";
+
     // Basic parameters with error handling
     unsigned initW = 64, initH = 64;
     Canvas canvas(initW, initH);
@@ -1266,7 +1747,9 @@ int main()
     // NEW: Export dialogs
     bool showGIFExportDialog = false;
     bool showGodotExportDialog = false;
-    std::string gifDelayStr = "5";
+
+    // NEW: File browser
+    FileBrowser fileBrowser;
 
     // Track if we just clicked a UI element (to prevent drawing on UI clicks)
     bool uiElementClicked = false;
@@ -1286,6 +1769,10 @@ int main()
     // NEW: Export status message
     std::string exportStatus = "";
     float exportStatusTimer = 0.0f;
+
+    // NEW: Double click tracking for file browser
+    sf::Clock doubleClickClock;
+    sf::Vector2i lastClickPos;
 
     sf::Clock clock;
 
@@ -1316,193 +1803,460 @@ int main()
             {
                 if (ev.type == sf::Event::Closed)
                     running = false;
-                else if (ev.type == sf::Event::MouseWheelScrolled)
+
+                // If file browser is open, only process events relevant to it
+                if (fileBrowser.isOpen &&
+                    ev.type != sf::Event::MouseButtonPressed &&
+                    ev.type != sf::Event::MouseButtonReleased &&
+                    ev.type != sf::Event::KeyPressed &&
+                    ev.type != sf::Event::TextEntered)
                 {
-                    if (ev.mouseWheelScroll.delta > 0)
-                        canvas.zoom *= 1.1f;
-                    else
-                        canvas.zoom /= 1.1f;
-                    if (canvas.zoom < 1.0f)
-                        canvas.zoom = 1.0f;
-                    if (canvas.zoom > 64.0f)
-                        canvas.zoom = 64.0f;
-                }
-                else if (ev.type == sf::Event::MouseButtonPressed)
-                {
-                    if (ev.mouseButton.button == sf::Mouse::Left)
-                    {
-                        leftMouseDown = true;
-                        leftMousePressedThisFrame = true; // NEW: Mark as pressed this frame
-                        // Reset button click flags on new mouse press
-                        duplicateClicked = false;
-                        deleteClicked = false;
-                    }
-                    if (ev.mouseButton.button == sf::Mouse::Middle)
-                        middleMouseDown = true;
-                    lastMouse = sf::Mouse::getPosition(window);
-                }
-                else if (ev.type == sf::Event::MouseButtonReleased)
-                {
-                    if (ev.mouseButton.button == sf::Mouse::Left)
-                    {
-                        leftMouseDown = false;
-                    }
-                    if (ev.mouseButton.button == sf::Mouse::Middle)
-                        middleMouseDown = false;
+                    continue; // Skip other events when file browser is open
                 }
 
-                else if (ev.type == sf::Event::KeyPressed)
+                // Handle file browser events first if it's open
+                if (fileBrowser.isOpen)
                 {
-                    bool ctrl = ev.key.control;
-                    if (ctrl && ev.key.code == sf::Keyboard::N)
+                    bool fileBrowserHandledEvent = fileBrowser.handleEvent(ev, sf::Mouse::getPosition(window), window);
+
+                    if (fileBrowserHandledEvent)
                     {
-                        canvas.newProject(64, 64);
-                    }
-                    else if (ctrl && ev.key.code == sf::Keyboard::S)
-                    {
-                        // save
-                        if (canvas.saveToPix("project.pix"))
+                        // Check for double click
+                        if (ev.type == sf::Event::MouseButtonPressed && ev.mouseButton.button == sf::Mouse::Left)
                         {
-                            exportStatus = "Saved project.pix";
-                            exportStatusTimer = 3.0f;
-                        }
-                        else
-                        {
-                            exportStatus = "Failed to save project.pix";
-                            exportStatusTimer = 3.0f;
-                        }
-                    }
-                    else if (ctrl && ev.key.shift && ev.key.code == sf::Keyboard::S)
-                    {
-                        // export frames as PNG sequence
-                        if (canvas.exportAllFramesPNG("export/frame"))
-                        {
-                            exportStatus = "Exported frames to export/frame_#.png";
-                            exportStatusTimer = 3.0f;
-                        }
-                        else
-                        {
-                            exportStatus = "Failed to export frames";
-                            exportStatusTimer = 3.0f;
-                        }
-                    }
-                    else if (ev.key.code == sf::Keyboard::Space)
-                    {
-                        playing = !playing;
-                    }
-                    else if (ev.key.code == sf::Keyboard::G)
-                    {
-                        canvas.showGrid = !canvas.showGrid;
-                    }
-                    else if (ev.key.code == sf::Keyboard::O)
-                    {
-                        canvas.onionSkin = !canvas.onionSkin;
-                    }
-                    else if (ev.key.code == sf::Keyboard::Right)
-                    {
-                        canvas.nextFrame();
-                    }
-                    else if (ev.key.code == sf::Keyboard::Left)
-                    {
-                        canvas.prevFrame();
-                    }
-                    else if (ev.key.code == sf::Keyboard::R && ctrl)
-                    {
-                        showResizeDialog = !showResizeDialog;
-                        newWidthStr = std::to_string(canvas.width);
-                        newHeightStr = std::to_string(canvas.height);
-                        widthInputActive = true;
-                        heightInputActive = false;
-                    }
-                    else if (ev.key.code == sf::Keyboard::E && ctrl)
-                    {
-                        // NEW: Open eraser size dialog
-                        showEraserSizeDialog = !showEraserSizeDialog;
-                        eraserSizeStr = std::to_string(canvas.eraserSize);
-                    }
-                    else if (ev.key.code == sf::Keyboard::Tab && (showResizeDialog || showEraserSizeDialog || showGIFExportDialog))
-                    {
-                        // Switch between inputs in dialogs
-                        if (showResizeDialog)
-                        {
-                            if (widthInputActive)
+                            sf::Vector2i currentClickPos = sf::Mouse::getPosition(window);
+
+                            if (doubleClickClock.getElapsedTime().asMilliseconds() < 500 &&
+                                std::abs(currentClickPos.x - lastClickPos.x) < 10 &&
+                                std::abs(currentClickPos.y - lastClickPos.y) < 10)
                             {
-                                widthInputActive = false;
-                                heightInputActive = true;
+                                fileBrowser.doubleClick(currentClickPos, window);
+                            }
+
+                            doubleClickClock.restart();
+                            lastClickPos = currentClickPos;
+                        }
+
+                        // If a file was selected and OK was clicked, handle the operation
+                        if (!fileBrowser.selectedFile.empty() && fileBrowser.selectedFile != ".." &&
+                            std::find(fileBrowser.directories.begin(), fileBrowser.directories.end(), fileBrowser.selectedFile) == fileBrowser.directories.end())
+                        {
+                            std::string fullPath = fileBrowser.currentPath;
+#ifdef _WIN32
+                            fullPath += "\\" + fileBrowser.selectedFile;
+#else
+                            fullPath += "/" + fileBrowser.selectedFile;
+#endif
+
+                            // Check which type of operation this is based on the browser title
+                            if (fileBrowser.title.find("Export GIF") != std::string::npos)
+                            {
+                                // GIF Export operation
+                                try
+                                {
+                                    int width = std::stoi(gifWidthStr);
+                                    int height = std::stoi(gifHeightStr);
+                                    int delay = std::stoi(gifDelayStr);
+                                    if (canvas.exportAsGIF(fullPath, delay, width, height))
+                                    {
+                                        exportStatus = "Exported GIF: " + fullPath;
+                                        exportStatusTimer = 3.0f;
+                                    }
+                                    else
+                                    {
+                                        exportStatus = "Failed to export GIF";
+                                        exportStatusTimer = 3.0f;
+                                    }
+                                }
+                                catch (...)
+                                {
+                                    exportStatus = "Invalid GIF values";
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+                            else if (fileBrowser.title.find("Export PNG") != std::string::npos)
+                            {
+                                // PNG Export operation
+                                if (canvas.exportCurrentFramePNG(fullPath))
+                                {
+                                    exportStatus = "Exported PNG: " + fullPath;
+                                    exportStatusTimer = 3.0f;
+                                }
+                                else
+                                {
+                                    exportStatus = "Failed to export PNG";
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+                            else if (fileBrowser.title.find("Save Project As") != std::string::npos)
+                            {
+                                // Save Project operation
+                                if (canvas.saveProjectAs(fullPath))
+                                {
+                                    exportStatus = "Saved " + fullPath;
+                                    exportStatusTimer = 3.0f;
+                                }
+                                else
+                                {
+                                    exportStatus = "Failed to save " + fullPath;
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+                            else if (fileBrowser.title.find("Open Project") != std::string::npos)
+                            {
+                                // Open Project operation
+                                if (canvas.loadFromPix(fullPath))
+                                {
+                                    exportStatus = "Opened " + fullPath;
+                                    exportStatusTimer = 3.0f;
+                                }
+                                else
+                                {
+                                    exportStatus = "Failed to open " + fullPath;
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+
+                            fileBrowser.isOpen = false;
+                            fileBrowser.selectedFile.clear(); // Clear selection after operation
+                        }
+                        // Mark that the file browser handled this event
+                        uiElementClicked = true;
+                        continue; // Skip further event processing for this event
+                    }
+                }
+                else
+                {
+                    // Original event handling when file browser is not open
+                    if (ev.type == sf::Event::MouseWheelScrolled)
+                    {
+                        if (ev.mouseWheelScroll.delta > 0)
+                            canvas.zoom *= 1.1f;
+                        else
+                            canvas.zoom /= 1.1f;
+                        if (canvas.zoom < 1.0f)
+                            canvas.zoom = 1.0f;
+                        if (canvas.zoom > 64.0f)
+                            canvas.zoom = 64.0f;
+                    }
+                    else if (ev.type == sf::Event::MouseButtonPressed)
+                    {
+                        if (ev.mouseButton.button == sf::Mouse::Left)
+                        {
+                            leftMouseDown = true;
+                            leftMousePressedThisFrame = true; // NEW: Mark as pressed this frame
+                            // Reset button click flags on new mouse press
+                            duplicateClicked = false;
+                            deleteClicked = false;
+                        }
+                        if (ev.mouseButton.button == sf::Mouse::Middle)
+                            middleMouseDown = true;
+                        lastMouse = sf::Mouse::getPosition(window);
+                    }
+                    else if (ev.type == sf::Event::MouseButtonReleased)
+                    {
+                        if (ev.mouseButton.button == sf::Mouse::Left)
+                        {
+                            leftMouseDown = false;
+                        }
+                        if (ev.mouseButton.button == sf::Mouse::Middle)
+                            middleMouseDown = false;
+                    }
+                    else if (ev.type == sf::Event::KeyPressed)
+                    {
+                        bool ctrl = ev.key.control;
+                        if (ctrl && ev.key.code == sf::Keyboard::N)
+                        {
+                            canvas.newProject(64, 64);
+                        }
+                        else if (ctrl && ev.key.code == sf::Keyboard::S)
+                        {
+                            // Quick save with current filename
+                            if (canvas.currentFilename.empty())
+                            {
+                                fileBrowser.isOpen = true;
+                                fileBrowser.title = "Save Project As";
+                                fileBrowser.defaultExtension = ".pix";
+                                fileBrowser.allowedExtensions = {".pix"};
+                                fileBrowser.filenameInput = "project.pix";
+                                fileBrowser.filenameInputActive = true;
                             }
                             else
                             {
-                                widthInputActive = true;
-                                heightInputActive = false;
-                            }
-                        }
-                    }
-                    else if (ev.key.code == sf::Keyboard::Enter)
-                    {
-                        if (renamingFrame)
-                        {
-                            // Finish renaming
-                            if (!frameNameInput.empty())
-                            {
-                                canvas.frames[frameToRename].name = frameNameInput;
-                            }
-                            renamingFrame = false;
-                            frameToRename = -1;
-                        }
-                        else if (showResizeDialog)
-                        {
-                            // Apply resize when Enter is pressed
-                            try
-                            {
-                                unsigned newWidth = std::stoi(newWidthStr);
-                                unsigned newHeight = std::stoi(newHeightStr);
-                                if (newWidth > 0 && newWidth < 1024 && newHeight > 0 && newHeight < 1024)
+                                if (canvas.saveProject())
                                 {
-                                    canvas.resizeCanvas(newWidth, newHeight);
-                                    showResizeDialog = false;
+                                    exportStatus = "Saved " + canvas.currentFilename;
+                                    exportStatusTimer = 3.0f;
+                                }
+                                else
+                                {
+                                    exportStatus = "Failed to save " + canvas.currentFilename;
+                                    exportStatusTimer = 3.0f;
+                                }
+                            }
+                        }
+                        else if (ctrl && ev.key.shift && ev.key.code == sf::Keyboard::S)
+                        {
+                            // Save As
+                            fileBrowser.isOpen = true;
+                            fileBrowser.title = "Save Project As";
+                            fileBrowser.defaultExtension = ".pix";
+                            fileBrowser.allowedExtensions = {".pix"};
+                            fileBrowser.filenameInput = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                            fileBrowser.filenameInputActive = true;
+                        }
+                        else if (ev.key.code == sf::Keyboard::Space)
+                        {
+                            playing = !playing;
+                        }
+                        else if (ev.key.code == sf::Keyboard::G)
+                        {
+                            canvas.showGrid = !canvas.showGrid;
+                        }
+                        else if (ev.key.code == sf::Keyboard::O)
+                        {
+                            canvas.onionSkin = !canvas.onionSkin;
+                        }
+                        else if (ev.key.code == sf::Keyboard::Right)
+                        {
+                            canvas.nextFrame();
+                        }
+                        else if (ev.key.code == sf::Keyboard::Left)
+                        {
+                            canvas.prevFrame();
+                        }
+                        else if (ev.key.code == sf::Keyboard::R && ctrl)
+                        {
+                            showResizeDialog = !showResizeDialog;
+                            newWidthStr = std::to_string(canvas.width);
+                            newHeightStr = std::to_string(canvas.height);
+                            widthInputActive = true;
+                            heightInputActive = false;
+                        }
+                        else if (ev.key.code == sf::Keyboard::E && ctrl)
+                        {
+                            // NEW: Open eraser size dialog
+                            showEraserSizeDialog = !showEraserSizeDialog;
+                            eraserSizeStr = std::to_string(canvas.eraserSize);
+                        }
+                        else if (ev.key.code == sf::Keyboard::Tab && (showResizeDialog || showEraserSizeDialog || showGIFExportDialog))
+                        {
+                            // Switch between inputs in dialogs
+                            if (showResizeDialog)
+                            {
+                                if (widthInputActive)
+                                {
                                     widthInputActive = false;
+                                    heightInputActive = true;
+                                }
+                                else
+                                {
+                                    widthInputActive = true;
                                     heightInputActive = false;
                                 }
                             }
-                            catch (...)
+                            else if (showGIFExportDialog)
                             {
-                                // Invalid input, ignore
-                                std::cout << "Invalid input for resize!\n";
+                                if (gifWidthInputActive)
+                                {
+                                    gifWidthInputActive = false;
+                                    gifHeightInputActive = true;
+                                }
+                                else if (gifHeightInputActive)
+                                {
+                                    gifHeightInputActive = false;
+                                    gifDelayInputActive = true;
+                                }
+                                else
+                                {
+                                    gifDelayInputActive = false;
+                                    gifWidthInputActive = true;
+                                }
+                            }
+                        }
+                        else if (ev.key.code == sf::Keyboard::Enter)
+                        {
+                            if (renamingFrame)
+                            {
+                                // Finish renaming
+                                if (!frameNameInput.empty())
+                                {
+                                    canvas.frames[frameToRename].name = frameNameInput;
+                                }
+                                renamingFrame = false;
+                                frameToRename = -1;
+                            }
+                            else if (showResizeDialog)
+                            {
+                                // Apply resize when Enter is pressed
+                                try
+                                {
+                                    unsigned newWidth = std::stoi(newWidthStr);
+                                    unsigned newHeight = std::stoi(newHeightStr);
+                                    if (newWidth > 0 && newWidth < 1024 && newHeight > 0 && newHeight < 1024)
+                                    {
+                                        canvas.resizeCanvas(newWidth, newHeight);
+                                        showResizeDialog = false;
+                                        widthInputActive = false;
+                                        heightInputActive = false;
+                                    }
+                                }
+                                catch (...)
+                                {
+                                    // Invalid input, ignore
+                                    std::cout << "Invalid input for resize!\n";
+                                }
+                            }
+                            else if (showEraserSizeDialog)
+                            {
+                                // Apply eraser size when Enter is pressed
+                                try
+                                {
+                                    int newSize = std::stoi(eraserSizeStr);
+                                    if (newSize > 0 && newSize <= 20) // Reasonable limits
+                                    {
+                                        canvas.eraserSize = newSize;
+                                        showEraserSizeDialog = false;
+                                    }
+                                }
+                                catch (...)
+                                {
+                                    // Invalid input, ignore
+                                    std::cout << "Invalid input for eraser size!\n";
+                                }
+                            }
+                            else if (showGIFExportDialog)
+                            {
+                                // Show file browser for GIF export location
+                                fileBrowser.isOpen = true;
+                                fileBrowser.title = "Export GIF";
+                                fileBrowser.defaultExtension = ".gif";
+                                fileBrowser.allowedExtensions = {".gif"};
+                                fileBrowser.filenameInput = "animation.gif";
+                                fileBrowser.filenameInputActive = true;
+                            }
+                        }
+                        else if (ev.key.code == sf::Keyboard::Escape)
+                        {
+                            if (renamingFrame)
+                            {
+                                // Cancel renaming
+                                renamingFrame = false;
+                                frameToRename = -1;
+                            }
+                            else if (showResizeDialog)
+                            {
+                                // Cancel resize dialog
+                                showResizeDialog = false;
+                                widthInputActive = false;
+                                heightInputActive = false;
+                            }
+                            else if (showEraserSizeDialog)
+                            {
+                                // Cancel eraser size dialog
+                                showEraserSizeDialog = false;
+                            }
+                            else if (showGIFExportDialog)
+                            {
+                                // Cancel GIF export dialog
+                                showGIFExportDialog = false;
+                            }
+                            else if (showGodotExportDialog)
+                            {
+                                // Cancel Godot export dialog
+                                showGodotExportDialog = false;
+                            }
+                            else if (showSaveDialog)
+                            {
+                                showSaveDialog = false;
+                            }
+                            else if (showOpenDialog)
+                            {
+                                showOpenDialog = false;
+                            }
+                            else if (colorPicker.isOpen)
+                            {
+                                colorPicker.isOpen = false;
+                            }
+                            else if (fileBrowser.isOpen)
+                            {
+                                fileBrowser.isOpen = false;
+                            }
+                        }
+                        else if (ctrl && ev.key.code == sf::Keyboard::O)
+                        {
+                            // NEW: Open project
+                            fileBrowser.isOpen = true;
+                            fileBrowser.title = "Open Project";
+                            fileBrowser.defaultExtension = ".pix";
+                            fileBrowser.allowedExtensions = {".pix"};
+                            fileBrowser.filenameInput = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                            fileBrowser.filenameInputActive = false;
+                        }
+                    }
+                    else if (ev.type == sf::Event::TextEntered)
+                    {
+                        if (showResizeDialog && (widthInputActive || heightInputActive))
+                        {
+                            if (ev.text.unicode == '\b') // Backspace
+                            {
+                                if (widthInputActive && !newWidthStr.empty())
+                                    newWidthStr.pop_back();
+                                else if (heightInputActive && !newHeightStr.empty())
+                                    newHeightStr.pop_back();
+                            }
+                            else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
+                            {
+                                if (widthInputActive)
+                                {
+                                    // Limit width input to reasonable length
+                                    if (newWidthStr.length() < 4)
+                                        newWidthStr += static_cast<char>(ev.text.unicode);
+                                }
+                                else if (heightInputActive)
+                                {
+                                    // Limit height input to reasonable length
+                                    if (newHeightStr.length() < 4)
+                                        newHeightStr += static_cast<char>(ev.text.unicode);
+                                }
                             }
                         }
                         else if (showEraserSizeDialog)
                         {
-                            // Apply eraser size when Enter is pressed
-                            try
+                            if (ev.text.unicode == '\b') // Backspace
                             {
-                                int newSize = std::stoi(eraserSizeStr);
-                                if (newSize > 0 && newSize <= 20) // Reasonable limits
-                                {
-                                    canvas.eraserSize = newSize;
-                                    showEraserSizeDialog = false;
-                                }
+                                if (!eraserSizeStr.empty())
+                                    eraserSizeStr.pop_back();
                             }
-                            catch (...)
+                            else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
                             {
-                                // Invalid input, ignore
-                                std::cout << "Invalid input for eraser size!\n";
+                                // Limit eraser size input
+                                if (eraserSizeStr.length() < 3)
+                                    eraserSizeStr += static_cast<char>(ev.text.unicode);
                             }
                         }
                         else if (showGIFExportDialog)
                         {
                             if (ev.text.unicode == '\b') // Backspace
                             {
-                                if (gifSizeInputActive && !gifSizeStr.empty())
-                                    gifSizeStr.pop_back();
+                                if (gifWidthInputActive && !gifWidthStr.empty())
+                                    gifWidthStr.pop_back();
+                                else if (gifHeightInputActive && !gifHeightStr.empty())
+                                    gifHeightStr.pop_back();
                                 else if (gifDelayInputActive && !gifDelayStr.empty())
                                     gifDelayStr.pop_back();
                             }
                             else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
                             {
-                                if (gifSizeInputActive)
+                                if (gifWidthInputActive)
                                 {
-                                    if (gifSizeStr.length() < 2) // Limit to 2 digits
-                                        gifSizeStr += static_cast<char>(ev.text.unicode);
+                                    if (gifWidthStr.length() < 4)
+                                        gifWidthStr += static_cast<char>(ev.text.unicode);
+                                }
+                                else if (gifHeightInputActive)
+                                {
+                                    if (gifHeightStr.length() < 4)
+                                        gifHeightStr += static_cast<char>(ev.text.unicode);
                                 }
                                 else if (gifDelayInputActive)
                                 {
@@ -1510,211 +2264,18 @@ int main()
                                         gifDelayStr += static_cast<char>(ev.text.unicode);
                                 }
                             }
-
-                            // Update the current size value for real-time preview
-                            try
+                        }
+                        else if (renamingFrame)
+                        {
+                            if (ev.text.unicode == '\b') // Backspace
                             {
-                                gifSize = std::stoi(gifSizeStr);
-                                if (gifSize < 1)
-                                    gifSize = 1;
-                                if (gifSize > 10)
-                                    gifSize = 10;
+                                if (!frameNameInput.empty())
+                                    frameNameInput.pop_back();
                             }
-                            catch (...)
+                            else if (ev.text.unicode >= 32 && ev.text.unicode < 128) // Printable characters
                             {
-                                gifSize = 1;
+                                frameNameInput += static_cast<char>(ev.text.unicode);
                             }
-                        }
-                    }
-                    else if (ev.key.code == sf::Keyboard::Escape)
-                    {
-                        if (renamingFrame)
-                        {
-                            // Cancel renaming
-                            renamingFrame = false;
-                            frameToRename = -1;
-                        }
-                        else if (showResizeDialog)
-                        {
-                            // Cancel resize dialog
-                            showResizeDialog = false;
-                            widthInputActive = false;
-                            heightInputActive = false;
-                        }
-                        else if (showEraserSizeDialog)
-                        {
-                            // Cancel eraser size dialog
-                            showEraserSizeDialog = false;
-                        }
-                        else if (showGIFExportDialog)
-                        {
-                            // Cancel GIF export dialog
-                            showGIFExportDialog = false;
-                        }
-                        else if (showGodotExportDialog)
-                        {
-                            // Cancel Godot export dialog
-                            showGodotExportDialog = false;
-                        }
-                        else if (showSaveDialog)
-                        {
-                            showSaveDialog = false;
-                        }
-                        else if (showOpenDialog)
-                        {
-                            showOpenDialog = false;
-                        }
-                        else if (colorPicker.isOpen)
-                        {
-                            colorPicker.isOpen = false;
-                        }
-                    }
-                    else if (ctrl && ev.key.code == sf::Keyboard::O)
-                    {
-                        // NEW: Open project
-                        showOpenDialog = true;
-                        openFilename = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
-                    }
-                    else if (ctrl && ev.key.code == sf::Keyboard::S)
-                    {
-                        // NEW: Save project (with current filename or show dialog)
-                        if (canvas.currentFilename.empty())
-                        {
-                            showSaveDialog = true;
-                            saveFilename = "project.pix";
-                        }
-                        else
-                        {
-                            if (canvas.saveProject())
-                            {
-                                exportStatus = "Saved " + canvas.currentFilename;
-                                exportStatusTimer = 3.0f;
-                            }
-                            else
-                            {
-                                exportStatus = "Failed to save " + canvas.currentFilename;
-                                exportStatusTimer = 3.0f;
-                            }
-                        }
-                    }
-                    else if (ctrl && ev.key.shift && ev.key.code == sf::Keyboard::S)
-                    {
-                        // NEW: Save As
-                        showSaveDialog = true;
-                        saveFilename = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
-                    }
-                    else if (showGIFExportDialog)
-                    {
-                        if (gifSizeInputActive)
-                        {
-                            gifSizeInputActive = false;
-                            gifDelayInputActive = true;
-                        }
-                        else
-                        {
-                            gifSizeInputActive = true;
-                            gifDelayInputActive = false;
-                        }
-                    }
-                }
-                else if (ev.type == sf::Event::TextEntered)
-                {
-                    if (showResizeDialog && (widthInputActive || heightInputActive))
-                    {
-                        if (ev.text.unicode == '\b') // Backspace
-                        {
-                            if (widthInputActive && !newWidthStr.empty())
-                                newWidthStr.pop_back();
-                            else if (heightInputActive && !newHeightStr.empty())
-                                newHeightStr.pop_back();
-                        }
-                        else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
-                        {
-                            if (widthInputActive)
-                            {
-                                // Limit width input to reasonable length
-                                if (newWidthStr.length() < 4)
-                                    newWidthStr += static_cast<char>(ev.text.unicode);
-                            }
-                            else if (heightInputActive)
-                            {
-                                // Limit height input to reasonable length
-                                if (newHeightStr.length() < 4)
-                                    newHeightStr += static_cast<char>(ev.text.unicode);
-                            }
-                        }
-                    }
-                    else if (showEraserSizeDialog)
-                    {
-                        if (ev.text.unicode == '\b') // Backspace
-                        {
-                            if (!eraserSizeStr.empty())
-                                eraserSizeStr.pop_back();
-                        }
-                        else if (ev.text.unicode >= '0' && ev.text.unicode <= '9')
-                        {
-                            // Limit eraser size input
-                            if (eraserSizeStr.length() < 3)
-                                eraserSizeStr += static_cast<char>(ev.text.unicode);
-                        }
-                    }
-                    else if (showGIFExportDialog)
-                    {
-                        // Export GIF when Enter is pressed
-                        try
-                        {
-                            int delay = std::stoi(gifDelayStr);
-                            int size = std::stoi(gifSizeStr);
-                            if (delay > 0 && delay <= 100 && size > 0 && size <= 10)
-                            {
-                                if (canvas.exportAsGIF("export/animation.gif", delay, size))
-                                {
-                                    exportStatus = "Exported GIF: export/animation.gif (" +
-                                                   std::to_string(canvas.width * size) + "x" +
-                                                   std::to_string(canvas.height * size) + ")";
-                                    exportStatusTimer = 3.0f;
-                                    showGIFExportDialog = false;
-                                }
-                                else
-                                {
-                                    exportStatus = "Failed to export GIF";
-                                    exportStatusTimer = 3.0f;
-                                }
-                            }
-                        }
-                        catch (...)
-                        {
-                            exportStatus = "Invalid GIF values";
-                            exportStatusTimer = 3.0f;
-                        }
-                    }
-                    else if (showSaveDialog || showOpenDialog)
-                    {
-                        if (ev.text.unicode == '\b') // Backspace
-                        {
-                            if (showSaveDialog && !saveFilename.empty())
-                                saveFilename.pop_back();
-                            else if (showOpenDialog && !openFilename.empty())
-                                openFilename.pop_back();
-                        }
-                        else if (ev.text.unicode >= 32 && ev.text.unicode < 127) // Printable characters
-                        {
-                            if (showSaveDialog)
-                                saveFilename += static_cast<char>(ev.text.unicode);
-                            else if (showOpenDialog)
-                                openFilename += static_cast<char>(ev.text.unicode);
-                        }
-                    }
-                    else if (renamingFrame)
-                    {
-                        if (ev.text.unicode == '\b') // Backspace
-                        {
-                            if (!frameNameInput.empty())
-                                frameNameInput.pop_back();
-                        }
-                        else if (ev.text.unicode >= 32 && ev.text.unicode < 128) // Printable characters
-                        {
-                            frameNameInput += static_cast<char>(ev.text.unicode);
                         }
                     }
                 }
@@ -1741,7 +2302,7 @@ int main()
             }
 
             // Handle color picker clicks - ONLY on mouse press, not hold
-            if (leftMousePressedThisFrame && !uiElementClicked)
+            if (leftMousePressedThisFrame && !uiElementClicked && !fileBrowser.isOpen)
             {
                 if (colorPicker.handleClick(mpos, canvas.drawColor))
                 {
@@ -1750,7 +2311,7 @@ int main()
             }
 
             // Drawing: convert mouse to pixel coords
-            if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame)
+            if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
             {
                 // map mouse to canvas pixel position
                 float localX = (mpos.x - canvasArea.left - canvas.pan.x) / canvas.zoom;
@@ -1810,7 +2371,7 @@ int main()
             float bw = 64, bh = 32, spacing = 6;
 
             // Check hover states for tool buttons
-            if (!uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame)
+            if (!uiElementClicked && !colorPicker.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
             {
                 // Pencil button hover
                 if (mpos.x >= (int)x && mpos.x <= (int)(x + bw) && mpos.y >= (int)y && mpos.y <= (int)(y + bh))
@@ -1834,7 +2395,7 @@ int main()
             // Pencil button
             drawButton(window, sf::FloatRect(x, y, bw, bh), font, "PENCIL",
                        canvas.currentTool == Tool::Pencil, hoveredToolButton == 0);
-            if (leftMousePressedThisFrame && hoveredToolButton == 0 && !uiElementClicked)
+            if (leftMousePressedThisFrame && hoveredToolButton == 0 && !uiElementClicked && !fileBrowser.isOpen)
             {
                 canvas.currentTool = Tool::Pencil;
                 uiElementClicked = true;
@@ -1845,7 +2406,7 @@ int main()
             // Eraser button
             drawButton(window, sf::FloatRect(x, y, bw, bh), font, "ERASER",
                        canvas.currentTool == Tool::Eraser, hoveredToolButton == 1);
-            if (leftMousePressedThisFrame && hoveredToolButton == 1 && !uiElementClicked)
+            if (leftMousePressedThisFrame && hoveredToolButton == 1 && !uiElementClicked && !fileBrowser.isOpen)
             {
                 canvas.currentTool = Tool::Eraser;
                 uiElementClicked = true;
@@ -1856,7 +2417,7 @@ int main()
             // Fill button
             drawButton(window, sf::FloatRect(x, y, bw, bh), font, "FILL",
                        canvas.currentTool == Tool::Fill, hoveredToolButton == 2);
-            if (leftMousePressedThisFrame && hoveredToolButton == 2 && !uiElementClicked)
+            if (leftMousePressedThisFrame && hoveredToolButton == 2 && !uiElementClicked && !fileBrowser.isOpen)
             {
                 canvas.currentTool = Tool::Fill;
                 uiElementClicked = true;
@@ -1875,7 +2436,7 @@ int main()
             bool colorBtnHovered = (mpos.x >= (int)(colorX + 40) && mpos.x <= (int)(colorX + 40 + 60) &&
                                     mpos.y >= (int)y && mpos.y <= (int)(y + bh));
             drawButton(window, sf::FloatRect(colorX + 40, y, 60, bh), font, "COLORS", false, colorBtnHovered);
-            if (leftMousePressedThisFrame && colorBtnHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && colorBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 colorPicker.isOpen = !colorPicker.isOpen;
                 uiElementClicked = true;
@@ -1886,7 +2447,7 @@ int main()
                                          mpos.y >= (int)y && mpos.y <= (int)(y + bh));
             drawButton(window, sf::FloatRect(colorX + 110, y, 80, bh), font,
                        "ERASER: " + std::to_string(canvas.eraserSize), false, eraserSizeBtnHovered);
-            if (leftMousePressedThisFrame && eraserSizeBtnHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && eraserSizeBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 showEraserSizeDialog = !showEraserSizeDialog;
                 eraserSizeStr = std::to_string(canvas.eraserSize);
@@ -1897,7 +2458,7 @@ int main()
             bool resizeBtnHovered = (mpos.x >= (int)(colorX + 200) && mpos.x <= (int)(colorX + 200 + 80) &&
                                      mpos.y >= (int)y && mpos.y <= (int)(y + bh));
             drawButton(window, sf::FloatRect(colorX + 200, y, 80, bh), font, "RESIZE", false, resizeBtnHovered);
-            if (leftMousePressedThisFrame && resizeBtnHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && resizeBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 showResizeDialog = !showResizeDialog;
                 newWidthStr = std::to_string(canvas.width);
@@ -1906,43 +2467,37 @@ int main()
                 heightInputActive = false;
                 uiElementClicked = true;
             }
-            // Save button
-            bool saveBtnHovered = (mpos.x >= (int)(colorX + 290) && mpos.x <= (int)(colorX + 290 + 60) &&
+
+            // Save As button
+            bool saveBtnHovered = (mpos.x >= (int)(colorX + 290) && mpos.x <= (int)(colorX + 290 + 80) &&
                                    mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 290, y, 60, bh), font, "SAVE", false, saveBtnHovered);
-            if (leftMousePressedThisFrame && saveBtnHovered && !uiElementClicked)
+            drawButton(window, sf::FloatRect(colorX + 290, y, 80, bh), font, "SAVE AS", false, saveBtnHovered);
+            if (leftMousePressedThisFrame && saveBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
-                if (canvas.currentFilename.empty())
-                {
-                    showSaveDialog = true;
-                    saveFilename = "project.pix";
-                }
-                else
-                {
-                    if (canvas.saveProject())
-                    {
-                        exportStatus = "Saved " + canvas.currentFilename;
-                        exportStatusTimer = 3.0f;
-                    }
-                    else
-                    {
-                        exportStatus = "Failed to save " + canvas.currentFilename;
-                        exportStatusTimer = 3.0f;
-                    }
-                }
-                uiElementClicked = true;
+                fileBrowser.isOpen = true;
+                fileBrowser.title = "Save Project As";
+                fileBrowser.defaultExtension = ".pix";
+                fileBrowser.allowedExtensions = {".pix"};
+                fileBrowser.filenameInput = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                fileBrowser.filenameInputActive = true;
+                // Don't set uiElementClicked = true here!
             }
 
             // Open button
-            bool openBtnHovered = (mpos.x >= (int)(colorX + 360) && mpos.x <= (int)(colorX + 360 + 60) &&
+            bool openBtnHovered = (mpos.x >= (int)(colorX + 380) && mpos.x <= (int)(colorX + 380 + 80) &&
                                    mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 360, y, 60, bh), font, "OPEN", false, openBtnHovered);
-            if (leftMousePressedThisFrame && openBtnHovered && !uiElementClicked)
+            drawButton(window, sf::FloatRect(colorX + 380, y, 80, bh), font, "OPEN", false, openBtnHovered);
+            if (leftMousePressedThisFrame && openBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
-                showOpenDialog = true;
-                openFilename = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
-                uiElementClicked = true;
+                fileBrowser.isOpen = true;
+                fileBrowser.title = "Open Project";
+                fileBrowser.defaultExtension = ".pix";
+                fileBrowser.allowedExtensions = {".pix"};
+                fileBrowser.filenameInput = canvas.currentFilename.empty() ? "project.pix" : canvas.currentFilename;
+                fileBrowser.filenameInputActive = false;
+                // Don't set uiElementClicked = true here!
             }
+
             // Draw canvas background (8-bit style checkerboard)
             sf::RectangleShape canvasBg({canvasArea.width, canvasArea.height});
             canvasBg.setPosition(canvasArea.left, canvasArea.top);
@@ -2011,7 +2566,7 @@ int main()
             bool playBtnHovered = (mpos.x >= (int)(sidebar.left + 8) && mpos.x <= (int)(sidebar.left + 68) &&
                                    mpos.y >= (int)controlY && mpos.y <= (int)(controlY + 28));
             drawButton(window, sf::FloatRect(sidebar.left + 8, controlY, 60, 28), font, playing ? "STOP" : "PLAY", playing, playBtnHovered);
-            if (leftMousePressedThisFrame && playBtnHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && playBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 playing = !playing;
                 uiElementClicked = true;
@@ -2021,7 +2576,7 @@ int main()
             bool prevBtnHovered = (mpos.x >= (int)(sidebar.left + 76) && mpos.x <= (int)(sidebar.left + 104) &&
                                    mpos.y >= (int)controlY && mpos.y <= (int)(controlY + 28));
             drawButton(window, sf::FloatRect(sidebar.left + 76, controlY, 28, 28), font, "<", false, prevBtnHovered);
-            if (leftMousePressedThisFrame && prevBtnHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && prevBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 canvas.prevFrame();
                 uiElementClicked = true;
@@ -2031,7 +2586,7 @@ int main()
             bool nextBtnHovered = (mpos.x >= (int)(sidebar.left + 112) && mpos.x <= (int)(sidebar.left + 140) &&
                                    mpos.y >= (int)controlY && mpos.y <= (int)(controlY + 28));
             drawButton(window, sf::FloatRect(sidebar.left + 112, controlY, 28, 28), font, ">", false, nextBtnHovered);
-            if (leftMousePressedThisFrame && nextBtnHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && nextBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 canvas.nextFrame();
                 uiElementClicked = true;
@@ -2108,7 +2663,7 @@ int main()
                 drawButton(window, sf::FloatRect(r.left + 128, buttonY, 20, 20), font, "X", false, false);
 
                 // Handle frame selection and controls - ONLY on mouse press
-                if (leftMousePressedThisFrame && !uiElementClicked && !renamingFrame)
+                if (leftMousePressedThisFrame && !uiElementClicked && !renamingFrame && !fileBrowser.isOpen)
                 {
                     sf::Vector2i mm = sf::Mouse::getPosition(window);
                     if (mm.x >= (int)r.left && mm.x <= (int)(r.left + r.width) && mm.y >= (int)r.top && mm.y <= (int)(r.top + r.height))
@@ -2173,7 +2728,7 @@ int main()
             bool addFrameHovered = (mpos.x >= (int)(sidebar.left + 8) && mpos.x <= (int)(sidebar.left + 88) &&
                                     mpos.y >= (int)(fy + 8) && mpos.y <= (int)(fy + 36));
             drawButton(window, sf::FloatRect(sidebar.left + 8, fy + 8, 80, 28), font, "+ FRAME", false, addFrameHovered);
-            if (leftMousePressedThisFrame && addFrameHovered && !renamingFrame && !uiElementClicked)
+            if (leftMousePressedThisFrame && addFrameHovered && !renamingFrame && !uiElementClicked && !fileBrowser.isOpen)
             {
                 canvas.addFrame();
                 uiElementClicked = true;
@@ -2186,13 +2741,14 @@ int main()
             bool gifExportHovered = (mpos.x >= (int)(sidebar.left + 8) && mpos.x <= (int)(sidebar.left + 88) &&
                                      mpos.y >= (int)(exportY) && mpos.y <= (int)(exportY + 28));
             drawButton(window, sf::FloatRect(sidebar.left + 8, exportY, 80, 28), font, "EXPORT GIF", false, gifExportHovered);
-            if (leftMousePressedThisFrame && gifExportHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && gifExportHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 showGIFExportDialog = !showGIFExportDialog;
+                gifWidthStr = std::to_string(canvas.width);
+                gifHeightStr = std::to_string(canvas.height);
                 gifDelayStr = "5";
-                gifSizeStr = "1"; // Default to 1x scale
-                gifSize = 1;
-                gifSizeInputActive = true;
+                gifWidthInputActive = true;
+                gifHeightInputActive = false;
                 gifDelayInputActive = false;
                 uiElementClicked = true;
             }
@@ -2200,7 +2756,7 @@ int main()
             bool godotExportHovered = (mpos.x >= (int)(sidebar.left + 96) && mpos.x <= (int)(sidebar.left + 176) &&
                                        mpos.y >= (int)(exportY) && mpos.y <= (int)(exportY + 28));
             drawButton(window, sf::FloatRect(sidebar.left + 96, exportY, 80, 28), font, "GODOT", false, godotExportHovered);
-            if (leftMousePressedThisFrame && godotExportHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && godotExportHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 if (canvas.exportForGodot("export"))
                 {
@@ -2219,26 +2775,27 @@ int main()
             bool pngExportHovered = (mpos.x >= (int)(sidebar.left + 8) && mpos.x <= (int)(sidebar.left + 88) &&
                                      mpos.y >= (int)(exportY + 35) && mpos.y <= (int)(exportY + 63));
             drawButton(window, sf::FloatRect(sidebar.left + 8, exportY + 35, 80, 28), font, "EXPORT PNG", false, pngExportHovered);
-            if (leftMousePressedThisFrame && pngExportHovered && !uiElementClicked)
+            if (leftMousePressedThisFrame && pngExportHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
-                if (canvas.exportCurrentFramePNG("export/frame.png"))
-                {
-                    exportStatus = "Exported current frame to export/frame.png";
-                    exportStatusTimer = 3.0f;
-                }
-                else
-                {
-                    exportStatus = "Failed to export frame";
-                    exportStatusTimer = 3.0f;
-                }
-                uiElementClicked = true;
+                fileBrowser.isOpen = true;
+                fileBrowser.title = "Export PNG";
+                fileBrowser.defaultExtension = ".png";
+                fileBrowser.allowedExtensions = {".png"};
+                fileBrowser.filenameInput = "frame.png";
+                fileBrowser.filenameInputActive = true;
+                // Don't set uiElementClicked = true here!
             }
-
             // Draw color picker if open
             colorPicker.draw(window, font);
 
+            // Draw file browser if open
+            if (fileBrowser.isOpen)
+            {
+                fileBrowser.draw(window, font);
+            }
+
             // Draw resize dialog with 8-bit style
-            if (showResizeDialog)
+            if (showResizeDialog && !fileBrowser.isOpen)
             {
                 sf::Vector2f dialogSize(250, 150);
                 sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
@@ -2309,7 +2866,7 @@ int main()
                 drawButton(window, sf::FloatRect(dialogPos.x + 170, dialogPos.y + 75, 60, 25), font, "CANCEL", false, cancelHovered);
 
                 // Handle resize dialog clicks - ONLY on mouse press
-                if (leftMousePressedThisFrame && !uiElementClicked)
+                if (leftMousePressedThisFrame && !uiElementClicked && !fileBrowser.isOpen)
                 {
                     sf::Vector2i mm = sf::Mouse::getPosition(window);
 
@@ -2376,7 +2933,7 @@ int main()
             }
 
             // Draw eraser size dialog with 8-bit style
-            if (showEraserSizeDialog)
+            if (showEraserSizeDialog && !fileBrowser.isOpen)
             {
                 sf::Vector2f dialogSize(250, 120);
                 sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
@@ -2427,7 +2984,7 @@ int main()
                 drawButton(window, sf::FloatRect(dialogPos.x + 140, dialogPos.y + 75, 60, 25), font, "CANCEL", false, cancelHovered);
 
                 // Handle eraser size dialog clicks - ONLY on mouse press
-                if (leftMousePressedThisFrame && !uiElementClicked)
+                if (leftMousePressedThisFrame && !uiElementClicked && !fileBrowser.isOpen)
                 {
                     sf::Vector2i mm = sf::Mouse::getPosition(window);
 
@@ -2475,10 +3032,10 @@ int main()
                 }
             }
 
-            // NEW: Draw GIF export dialog with size options
-            if (showGIFExportDialog)
+            // Draw GIF export dialog with 8-bit style
+            if (showGIFExportDialog && !fileBrowser.isOpen)
             {
-                sf::Vector2f dialogSize(300, 200); // Increased height for size options
+                sf::Vector2f dialogSize(300, 200);
                 sf::Vector2f dialogPos(winSize.x / 2 - dialogSize.x / 2, winSize.y / 2 - dialogSize.y / 2);
 
                 // Background with 8-bit style
@@ -2490,65 +3047,71 @@ int main()
                 window.draw(dialogBg);
 
                 // Title
-                sf::Text title("EXPORT GIF", font, 16);
+                sf::Text title("EXPORT GIF SETTINGS", font, 16);
                 title.setStyle(sf::Text::Bold);
                 title.setPosition(dialogPos.x + 10, dialogPos.y + 10);
                 title.setFillColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
                 window.draw(title);
 
-                // Size input
-                sf::Text sizeLabel("SIZE (1-10x):", font, 14);
-                sizeLabel.setStyle(sf::Text::Bold);
-                sizeLabel.setPosition(dialogPos.x + 20, dialogPos.y + 40);
-                sizeLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
-                window.draw(sizeLabel);
+                // Width input
+                sf::Text widthLabel("WIDTH:", font, 14);
+                widthLabel.setStyle(sf::Text::Bold);
+                widthLabel.setPosition(dialogPos.x + 20, dialogPos.y + 40);
+                widthLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(widthLabel);
 
-                sf::RectangleShape sizeInput({60, 25});
-                sizeInput.setPosition(dialogPos.x + 130, dialogPos.y + 40);
-                sizeInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
-                sizeInput.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
-                sizeInput.setOutlineThickness(2);
-                window.draw(sizeInput);
+                sf::RectangleShape widthInput({80, 25});
+                widthInput.setPosition(dialogPos.x + 80, dialogPos.y + 40);
+                widthInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+                widthInput.setOutlineColor(gifWidthInputActive ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                widthInput.setOutlineThickness(2);
+                window.draw(widthInput);
 
-                sf::Text sizeText(gifSizeStr, font, 14);
-                sizeText.setStyle(sf::Text::Bold);
-                sizeText.setPosition(dialogPos.x + 135, dialogPos.y + 45);
-                sizeText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
-                window.draw(sizeText);
+                sf::Text widthText(gifWidthStr, font, 14);
+                widthText.setStyle(sf::Text::Bold);
+                widthText.setPosition(dialogPos.x + 85, dialogPos.y + 45);
+                widthText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(widthText);
+
+                // Height input
+                sf::Text heightLabel("HEIGHT:", font, 14);
+                heightLabel.setStyle(sf::Text::Bold);
+                heightLabel.setPosition(dialogPos.x + 20, dialogPos.y + 75);
+                heightLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(heightLabel);
+
+                sf::RectangleShape heightInput({80, 25});
+                heightInput.setPosition(dialogPos.x + 80, dialogPos.y + 75);
+                heightInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+                heightInput.setOutlineColor(gifHeightInputActive ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                heightInput.setOutlineThickness(2);
+                window.draw(heightInput);
+
+                sf::Text heightText(gifHeightStr, font, 14);
+                heightText.setStyle(sf::Text::Bold);
+                heightText.setPosition(dialogPos.x + 85, dialogPos.y + 80);
+                heightText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
+                window.draw(heightText);
 
                 // Delay input
                 sf::Text delayLabel("DELAY (1-100):", font, 14);
                 delayLabel.setStyle(sf::Text::Bold);
-                delayLabel.setPosition(dialogPos.x + 20, dialogPos.y + 75);
+                delayLabel.setPosition(dialogPos.x + 20, dialogPos.y + 110);
                 delayLabel.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
                 window.draw(delayLabel);
 
-                sf::RectangleShape delayInput({60, 25});
-                delayInput.setPosition(dialogPos.x + 130, dialogPos.y + 75);
+                sf::RectangleShape delayInput({80, 25});
+                delayInput.setPosition(dialogPos.x + 120, dialogPos.y + 110);
                 delayInput.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
-                delayInput.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+                delayInput.setOutlineColor(gifDelayInputActive ? sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b) : sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
                 delayInput.setOutlineThickness(2);
                 window.draw(delayInput);
 
                 sf::Text delayText(gifDelayStr, font, 14);
                 delayText.setStyle(sf::Text::Bold);
-                delayText.setPosition(dialogPos.x + 135, dialogPos.y + 80);
+                delayText.setPosition(dialogPos.x + 125, dialogPos.y + 115);
                 delayText.setFillColor(sf::Color(EightBitColors::White.r, EightBitColors::White.g, EightBitColors::White.b));
                 window.draw(delayText);
-
-                // Info text
-                std::string infoStr = "Output: " + std::to_string(canvas.width * gifSize) + "x" + std::to_string(canvas.height * gifSize);
-                sf::Text info(infoStr, font, 12);
-                info.setStyle(sf::Text::Bold);
-                info.setPosition(dialogPos.x + 20, dialogPos.y + 110);
-                info.setFillColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
-                window.draw(info);
-
-                sf::Text info2("Higher delay = slower animation", font, 12);
-                info2.setStyle(sf::Text::Bold);
-                info2.setPosition(dialogPos.x + 20, dialogPos.y + 125);
-                info2.setFillColor(sf::Color(EightBitColors::LightGray.r, EightBitColors::LightGray.g, EightBitColors::LightGray.b));
-                window.draw(info2);
 
                 // Apply button
                 bool applyHovered = (mpos.x >= (int)(dialogPos.x + 50) && mpos.x <= (int)(dialogPos.x + 110) &&
@@ -2561,76 +3124,73 @@ int main()
                 drawButton(window, sf::FloatRect(dialogPos.x + 140, dialogPos.y + 150, 60, 25), font, "CANCEL", false, cancelHovered);
 
                 // Handle GIF export dialog clicks - ONLY on mouse press
-                if (leftMousePressedThisFrame && !uiElementClicked)
+                if (leftMousePressedThisFrame && !uiElementClicked && !fileBrowser.isOpen)
                 {
                     sf::Vector2i mm = sf::Mouse::getPosition(window);
 
-                    // Check size input click
-                    sf::FloatRect sizeInputRect(dialogPos.x + 130, dialogPos.y + 40, 60, 25);
-                    if (sizeInputRect.contains((float)mm.x, (float)mm.y))
+                    // Define all rects first
+                    sf::FloatRect widthInputRect(dialogPos.x + 80, dialogPos.y + 40, 80, 25);
+                    sf::FloatRect heightInputRect(dialogPos.x + 80, dialogPos.y + 75, 80, 25);
+                    sf::FloatRect delayInputRect(dialogPos.x + 120, dialogPos.y + 110, 80, 25);
+                    sf::FloatRect applyRect(dialogPos.x + 50, dialogPos.y + 150, 60, 25);
+                    sf::FloatRect cancelRect(dialogPos.x + 140, dialogPos.y + 150, 60, 25);
+                    sf::FloatRect dialogRect(dialogPos.x, dialogPos.y, dialogSize.x, dialogSize.y);
+
+                    if (widthInputRect.contains((float)mm.x, (float)mm.y))
                     {
-                        gifSizeInputActive = true;
+                        gifWidthInputActive = true;
+                        gifHeightInputActive = false;
                         gifDelayInputActive = false;
                         uiElementClicked = true;
                     }
-
-                    // Check delay input click
-                    sf::FloatRect delayInputRect(dialogPos.x + 130, dialogPos.y + 75, 60, 25);
-                    if (delayInputRect.contains((float)mm.x, (float)mm.y))
+                    else if (heightInputRect.contains((float)mm.x, (float)mm.y))
+                    {
+                        gifHeightInputActive = true;
+                        gifWidthInputActive = false;
+                        gifDelayInputActive = false;
+                        uiElementClicked = true;
+                    }
+                    else if (delayInputRect.contains((float)mm.x, (float)mm.y))
                     {
                         gifDelayInputActive = true;
-                        gifSizeInputActive = false;
+                        gifWidthInputActive = false;
+                        gifHeightInputActive = false;
                         uiElementClicked = true;
                     }
-
-                    // Apply button
-                    if (applyHovered)
+                    else if (applyRect.contains((float)mm.x, (float)mm.y))
                     {
-                        try
-                        {
-                            int delay = std::stoi(gifDelayStr);
-                            int size = std::stoi(gifSizeStr);
-                            if (delay > 0 && delay <= 100 && size > 0 && size <= 10)
-                            {
-                                if (canvas.exportAsGIF("export/animation.gif", delay, size))
-                                {
-                                    exportStatus = "Exported GIF: export/animation.gif (" +
-                                                   std::to_string(canvas.width * size) + "x" +
-                                                   std::to_string(canvas.height * size) + ")";
-                                    exportStatusTimer = 3.0f;
-                                    showGIFExportDialog = false;
-                                }
-                                else
-                                {
-                                    exportStatus = "Failed to export GIF";
-                                    exportStatusTimer = 3.0f;
-                                }
-                            }
-                        }
-                        catch (...)
-                        {
-                            exportStatus = "Invalid GIF values";
-                            exportStatusTimer = 3.0f;
-                        }
-                        uiElementClicked = true;
-                    }
+                        // Show file browser for GIF export location
+                        fileBrowser.isOpen = true;
+                        fileBrowser.title = "Export GIF";
+                        fileBrowser.defaultExtension = ".gif";
+                        fileBrowser.allowedExtensions = {".gif"};
+                        fileBrowser.filenameInput = "animation.gif";
+                        fileBrowser.filenameInputActive = true;
 
-                    // Cancel button
-                    if (cancelHovered)
+                        // Close the GIF settings dialog but DON'T mark as UI clicked
+                        // This allows the file browser to open properly
+                        showGIFExportDialog = false;
+                        // Don't set uiElementClicked = true here!
+                    }
+                    else if (cancelRect.contains((float)mm.x, (float)mm.y))
                     {
                         showGIFExportDialog = false;
                         uiElementClicked = true;
                     }
-
-                    // Click outside dialog - close it
-                    sf::FloatRect dialogRect(dialogPos.x, dialogPos.y, dialogSize.x, dialogSize.y);
-                    if (!dialogRect.contains((float)mm.x, (float)mm.y))
+                    else if (!dialogRect.contains((float)mm.x, (float)mm.y))
                     {
+                        // Clicked outside dialog - close it
                         showGIFExportDialog = false;
+                        uiElementClicked = true;
+                    }
+                    else
+                    {
+                        // Clicked on the dialog background, just consume the click
                         uiElementClicked = true;
                     }
                 }
             }
+
             // NEW: Draw export status message
             if (!exportStatus.empty())
             {
