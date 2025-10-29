@@ -889,6 +889,128 @@ private:
         w.draw(t);
     }
 };
+
+// NEW: Help Dialog Class
+class HelpDialog
+{
+public:
+    bool isOpen = false;
+    sf::Vector2f position{200, 100};
+    sf::Vector2f size{500, 400};
+
+    void draw(sf::RenderWindow &window, sf::Font &font)
+    {
+        if (!isOpen)
+            return;
+
+        sf::Vector2u winSize = window.getSize();
+        sf::Vector2f dialogPos(winSize.x / 2 - size.x / 2, winSize.y / 2 - size.y / 2);
+
+        // Background with softer colors
+        sf::RectangleShape bg(size);
+        bg.setPosition(dialogPos);
+        bg.setFillColor(sf::Color(50, 60, 90));       // Softer blue
+        bg.setOutlineColor(sf::Color(120, 180, 255)); // Light blue border
+        bg.setOutlineThickness(2);
+        window.draw(bg);
+
+        // Title
+        sf::Text title("KEYBOARD SHORTCUTS", font, 18);
+        title.setStyle(sf::Text::Bold);
+        title.setPosition(dialogPos.x + 20, dialogPos.y + 20);
+        title.setFillColor(sf::Color(255, 220, 100)); // Soft yellow
+        window.draw(title);
+
+        // Shortcuts list
+        std::vector<std::pair<std::string, std::string>> shortcuts = {
+            {"Ctrl + Z", "Undo"},
+            {"Ctrl + Y", "Redo"},
+            {"Ctrl + S", "Save Project"},
+            {"Ctrl + O", "Open Project"},
+            {"Ctrl + N", "New Project"},
+            {"Ctrl + R", "Resize Canvas"},
+            {"Ctrl + E", "Eraser Size"},
+            {"Space", "Play/Stop Animation"},
+            {"G", "Toggle Grid"},
+            {"O", "Toggle Onion Skin"},
+            {"Left/Right", "Previous/Next Frame"},
+            {"Tab", "Switch between inputs"},
+            {"Esc", "Close dialogs"}};
+
+        float y = dialogPos.y + 60;
+        for (const auto &shortcut : shortcuts)
+        {
+            // Shortcut key
+            sf::Text keyText(shortcut.first, font, 14);
+            keyText.setStyle(sf::Text::Bold);
+            keyText.setPosition(dialogPos.x + 30, y);
+            keyText.setFillColor(sf::Color(150, 255, 150)); // Soft green
+            window.draw(keyText);
+
+            // Description
+            sf::Text descText(shortcut.second, font, 14);
+            descText.setPosition(dialogPos.x + 200, y);
+            descText.setFillColor(sf::Color(220, 220, 255)); // Light blue-white
+            window.draw(descText);
+
+            y += 30;
+        }
+
+        // Close button
+        drawButton(window, sf::FloatRect(dialogPos.x + size.x - 120, dialogPos.y + size.y - 40, 100, 30),
+                   font, "CLOSE", false, false);
+    }
+
+    bool handleClick(sf::Vector2i mousePos, sf::RenderWindow &window)
+    {
+        if (!isOpen)
+            return false;
+
+        sf::Vector2u winSize = window.getSize();
+        sf::Vector2f dialogPos(winSize.x / 2 - size.x / 2, winSize.y / 2 - size.y / 2);
+
+        // Check close button
+        sf::FloatRect closeBtn(dialogPos.x + size.x - 120, dialogPos.y + size.y - 40, 100, 30);
+        if (closeBtn.contains((float)mousePos.x, (float)mousePos.y))
+        {
+            isOpen = false;
+            return true;
+        }
+
+        // Click outside dialog to close
+        sf::FloatRect dialogRect(dialogPos.x, dialogPos.y, size.x, size.y);
+        if (!dialogRect.contains((float)mousePos.x, (float)mousePos.y))
+        {
+            isOpen = false;
+            return true;
+        }
+
+        return false;
+    }
+
+private:
+    void drawButton(sf::RenderWindow &w, const sf::FloatRect &rect, const sf::Font &font,
+                    const std::string &label, bool isActive, bool isHovered)
+    {
+        sf::Color bgColor = isActive ? sf::Color(80, 120, 200) : isHovered ? sf::Color(70, 100, 180)
+                                                                           : sf::Color(60, 80, 160);
+
+        sf::RectangleShape rs({rect.width, rect.height});
+        rs.setPosition(rect.left, rect.top);
+        rs.setFillColor(bgColor);
+        rs.setOutlineColor(sf::Color(140, 200, 255));
+        rs.setOutlineThickness(2);
+        w.draw(rs);
+
+        sf::Text t(label, font, 12);
+        t.setStyle(sf::Text::Bold);
+        sf::FloatRect textBounds = t.getLocalBounds();
+        t.setPosition(rect.left + (rect.width - textBounds.width) / 2,
+                      rect.top + (rect.height - textBounds.height) / 2 - 2);
+        t.setFillColor(sf::Color(240, 240, 255));
+        w.draw(t);
+    }
+};
 struct Action
 {
     enum Type
@@ -2088,6 +2210,7 @@ void drawPanel(sf::RenderWindow &w, const sf::FloatRect &rect, const std::string
         w.draw(titleText);
     }
 }
+
 int main()
 {
     // NEW: GIF export variables
