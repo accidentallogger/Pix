@@ -73,6 +73,39 @@ namespace EightBitColors
         Black, DarkBlue, DarkPurple, DarkGreen, Brown, DarkGray,
         LightGray, White, Red, Orange, Yellow, Green,
         Blue, Indigo, Pink, Peach};
+
+}
+
+namespace UIColorTheme
+{
+    // Dark background tones
+    const Color DarkBackground(30, 35, 45);  // Dark blue-gray
+    const Color PanelBackground(45, 50, 60); // Medium blue-gray
+    const Color LightBackground(60, 65, 75); // Light blue-gray
+
+    // Accent colors (muted and soothing)
+    const Color SoftTeal(80, 130, 140);    // Muted teal
+    const Color DustyBlue(100, 150, 180);  // Soft blue
+    const Color MutedGreen(100, 160, 130); // Sage green
+    const Color WarmGray(120, 110, 110);   // Muted purple-gray
+
+    // UI elements
+    const Color SoftWhite(220, 220, 220);  // Off-white, not pure white
+    const Color MediumGray(150, 150, 150); // Medium gray
+    const Color DarkGray(80, 80, 80);      // Dark gray
+
+    // Highlights (subtle)
+    const Color SoftYellow(200, 180, 100); // Muted gold
+    const Color Peach(200, 150, 130);      // Soft orange
+
+    // Button states
+    const Color ButtonNormal(60, 65, 75);   // Normal button
+    const Color ButtonHover(70, 120, 130);  // Button hover
+    const Color ButtonActive(80, 130, 140); // Button active
+
+    // Special UI elements
+    const Color GridLines(60, 70, 80); // Subtle grid
+    const Color CanvasBg(35, 40, 45);  // Canvas background
 }
 
 // Simple GIF encoder (minimal implementation)
@@ -583,8 +616,9 @@ public:
         // Background
         sf::RectangleShape bg(dialogSize);
         bg.setPosition(dialogPos);
-        bg.setFillColor(sf::Color(EightBitColors::DarkBlue.r, EightBitColors::DarkBlue.g, EightBitColors::DarkBlue.b));
-        bg.setOutlineColor(sf::Color(EightBitColors::Yellow.r, EightBitColors::Yellow.g, EightBitColors::Yellow.b));
+        bg.setFillColor(sf::Color(UIColorTheme::PanelBackground.r, UIColorTheme::PanelBackground.g, UIColorTheme::PanelBackground.b));
+        bg.setOutlineColor(sf::Color(UIColorTheme::SoftTeal.r, UIColorTheme::SoftTeal.g, UIColorTheme::SoftTeal.b));
+
         bg.setOutlineThickness(2);
         window.draw(bg);
 
@@ -953,7 +987,7 @@ public:
             descText.setFillColor(sf::Color(220, 220, 255)); // Light blue-white
             window.draw(descText);
 
-            y += 30;
+            y += 23;
         }
 
         // Close button
@@ -992,8 +1026,8 @@ private:
     void drawButton(sf::RenderWindow &w, const sf::FloatRect &rect, const sf::Font &font,
                     const std::string &label, bool isActive, bool isHovered)
     {
-        sf::Color bgColor = isActive ? sf::Color(80, 120, 200) : isHovered ? sf::Color(70, 100, 180)
-                                                                           : sf::Color(60, 80, 160);
+        sf::Color bgColor = isActive ? sf::Color(UIColorTheme::ButtonActive.r, UIColorTheme::ButtonActive.g, UIColorTheme::ButtonActive.b) : isHovered ? sf::Color(UIColorTheme::ButtonHover.r, UIColorTheme::ButtonHover.g, UIColorTheme::ButtonHover.b)
+                                                                                                                                                       : sf::Color(UIColorTheme::ButtonNormal.r, UIColorTheme::ButtonNormal.g, UIColorTheme::ButtonNormal.b);
 
         sf::RectangleShape rs({rect.width, rect.height});
         rs.setPosition(rect.left, rect.top);
@@ -1007,7 +1041,8 @@ private:
         sf::FloatRect textBounds = t.getLocalBounds();
         t.setPosition(rect.left + (rect.width - textBounds.width) / 2,
                       rect.top + (rect.height - textBounds.height) / 2 - 2);
-        t.setFillColor(sf::Color(240, 240, 255));
+        t.setFillColor(sf::Color(UIColorTheme::SoftWhite.r, UIColorTheme::SoftWhite.g, UIColorTheme::SoftWhite.b));
+
         w.draw(t);
     }
 };
@@ -1941,7 +1976,7 @@ class ColorWheel
 {
 public:
     bool isOpen = false;
-    sf::Vector2f position{100, 100};
+    sf::Vector2f position{520, 80};
     sf::Vector2f size{300, 350};
     Color currentColor{255, 0, 0, 255};
     sf::Image wheelImage;
@@ -2063,12 +2098,12 @@ public:
 
         // Draw color wheel
         sf::Sprite wheelSprite(wheelTexture);
-        wheelSprite.setPosition(position.x + (size.x - 256) / 2, position.y + 40);
+        wheelSprite.setPosition(position.x + (size.x - 256) / 2, position.y + 70);
         window.draw(wheelSprite);
 
         // Current color preview
         sf::RectangleShape preview({80, 60});
-        preview.setPosition(position.x + size.x - 90, position.y + 40);
+        preview.setPosition(position.x + size.x - 90, position.y + 10);
         preview.setFillColor(sf::Color(currentColor.r, currentColor.g, currentColor.b));
         preview.setOutlineColor(sf::Color::White);
         preview.setOutlineThickness(2);
@@ -2079,7 +2114,7 @@ public:
                              std::to_string(currentColor.g) + ", " +
                              std::to_string(currentColor.b),
                          font, 12);
-        rgbText.setPosition(position.x + size.x - 90, position.y + 110);
+        rgbText.setPosition(position.x + size.x - 290, position.y + 40);
         rgbText.setFillColor(sf::Color::White);
         window.draw(rgbText);
 
@@ -2305,7 +2340,7 @@ int main()
     sf::Vector2i lastClickPos;
 
     sf::Clock clock;
-
+    HelpDialog helpDialog;
     try
     {
         while (running)
@@ -2343,7 +2378,6 @@ int main()
                 {
                     continue; // Skip other events when file browser is open
                 }
-
                 // Handle file browser events first if it's open
                 if (fileBrowser.isOpen)
                 {
@@ -2691,6 +2725,10 @@ int main()
                                 renamingFrame = false;
                                 frameToRename = -1;
                             }
+                            else if (helpDialog.isOpen)
+                            {
+                                helpDialog.isOpen = false;
+                            }
                             else if (showResizeDialog)
                             {
                                 // Cancel resize dialog
@@ -2730,6 +2768,7 @@ int main()
                                 fileBrowser.isOpen = false;
                             }
                         }
+
                         else if (ctrl && ev.key.code == sf::Keyboard::O)
                         {
                             // NEW: Open project
@@ -2856,7 +2895,14 @@ int main()
                     uiElementClicked = true;
                 }
             }
-
+            // Handle help dialog clicks - ONLY on mouse press, not hold
+            if (leftMousePressedThisFrame && !uiElementClicked && !fileBrowser.isOpen && helpDialog.isOpen)
+            {
+                if (helpDialog.handleClick(mpos, window))
+                {
+                    uiElementClicked = true;
+                }
+            }
             // Drawing: convert mouse to pixel coords
             if (leftMouseDown && mouseInCanvas && !uiElementClicked && !colorWheel.isOpen && !showResizeDialog && !showEraserSizeDialog && !showGIFExportDialog && !showGodotExportDialog && !renamingFrame && !fileBrowser.isOpen)
             {
@@ -2905,7 +2951,8 @@ int main()
             }
 
             // Use a darker, more consistent background color
-            window.clear(sf::Color(60, 40, 100)); // Purple-blue background
+            window.clear(sf::Color(UIColorTheme::DarkBackground.r, UIColorTheme::DarkBackground.g, UIColorTheme::DarkBackground.b));
+
             // Draw main panels with 8-bit style
             drawPanel(window, sf::FloatRect(4, 4, (float)winSize.x - sidebarW - 8, toolbarH - 4), "TOOLS", font);
             drawPanel(window, sf::FloatRect(canvasArea.left - 4, canvasArea.top - 4, canvasArea.width + 8, canvasArea.height + 8), "CANVAS", font);
@@ -3014,10 +3061,19 @@ int main()
                 uiElementClicked = true;
             }
 
+            // Help button in bottom right corner
+            bool helpBtnHovered = (mpos.x >= (int)(winSize.x - 40) && mpos.x <= (int)(winSize.x - 10) &&
+                                   mpos.y >= (int)(winSize.y - 30) && mpos.y <= (int)(winSize.y - 10));
+            drawButton(window, sf::FloatRect(winSize.x - 40, winSize.y - 30, 30, 20), font, "?", false, helpBtnHovered);
+            if (leftMousePressedThisFrame && helpBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
+            {
+                helpDialog.isOpen = !helpDialog.isOpen;
+                uiElementClicked = true;
+            }
             // Save button - placed after Open button
-            bool saveBtnHovered = (mpos.x >= (int)(colorX + 460) && mpos.x <= (int)(colorX + 460 + 80) &&
+            bool saveBtnHovered = (mpos.x >= (int)(colorX + 370) && mpos.x <= (int)(colorX + 370 + 80) &&
                                    mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 460, y, 80, bh), font, "SAVE", false, saveBtnHovered);
+            drawButton(window, sf::FloatRect(colorX + 370, y, 80, bh), font, "SAVE", false, saveBtnHovered);
             if (leftMousePressedThisFrame && saveBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 if (canvas.currentFilename.empty())
@@ -3047,9 +3103,9 @@ int main()
                 uiElementClicked = true;
             }
             // Save As button - placed after Save button
-            bool saveAsBtnHovered = (mpos.x >= (int)(colorX + 540) && mpos.x <= (int)(colorX + 540 + 80) &&
+            bool saveAsBtnHovered = (mpos.x >= (int)(colorX + 450) && mpos.x <= (int)(colorX + 450 + 80) &&
                                      mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 540, y, 80, bh), font, "SAVE AS", false, saveAsBtnHovered);
+            drawButton(window, sf::FloatRect(colorX + 450, y, 80, bh), font, "SAVE AS", false, saveAsBtnHovered);
             if (leftMousePressedThisFrame && saveAsBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 fileBrowser.isOpen = true;
@@ -3061,9 +3117,9 @@ int main()
                 uiElementClicked = true;
             }
             // Open button
-            bool openBtnHovered = (mpos.x >= (int)(colorX + 380) && mpos.x <= (int)(colorX + 380 + 80) &&
+            bool openBtnHovered = (mpos.x >= (int)(colorX + 290) && mpos.x <= (int)(colorX + 290 + 80) &&
                                    mpos.y >= (int)y && mpos.y <= (int)(y + bh));
-            drawButton(window, sf::FloatRect(colorX + 380, y, 80, bh), font, "OPEN", false, openBtnHovered);
+            drawButton(window, sf::FloatRect(colorX + 290, y, 80, bh), font, "OPEN", false, openBtnHovered);
             if (leftMousePressedThisFrame && openBtnHovered && !uiElementClicked && !fileBrowser.isOpen)
             {
                 fileBrowser.isOpen = true;
@@ -3078,7 +3134,7 @@ int main()
             // Draw canvas background (8-bit style checkerboard)
             sf::RectangleShape canvasBg({canvasArea.width, canvasArea.height});
             canvasBg.setPosition(canvasArea.left, canvasArea.top);
-            canvasBg.setFillColor(sf::Color(EightBitColors::Black.r, EightBitColors::Black.g, EightBitColors::Black.b));
+            canvasBg.setFillColor(sf::Color(UIColorTheme::CanvasBg.r, UIColorTheme::CanvasBg.g, UIColorTheme::CanvasBg.b));
             window.draw(canvasBg);
 
             // Get current frame image & draw scaled by zoom and pan
@@ -3126,9 +3182,9 @@ int main()
                 {
                     float syp = canvasArea.top + canvas.pan.y + yg * canvas.zoom;
                     lines.append(sf::Vertex({canvasArea.left + canvas.pan.x, syp},
-                                            sf::Color(EightBitColors::DarkGray.r, EightBitColors::DarkGray.g, EightBitColors::DarkGray.b)));
+                                            sf::Color(UIColorTheme::GridLines.r, UIColorTheme::GridLines.g, UIColorTheme::GridLines.b)));
                     lines.append(sf::Vertex({canvasArea.left + canvas.pan.x + canvas.width * canvas.zoom, syp},
-                                            sf::Color(EightBitColors::DarkGray.r, EightBitColors::DarkGray.g, EightBitColors::DarkGray.b)));
+                                            sf::Color(UIColorTheme::GridLines.r, UIColorTheme::GridLines.g, UIColorTheme::GridLines.b)));
                 }
                 window.draw(lines);
             }
@@ -3369,6 +3425,11 @@ int main()
             if (fileBrowser.isOpen)
             {
                 fileBrowser.draw(window, font);
+            }
+            // Draw help dialog if open
+            if (helpDialog.isOpen && !fileBrowser.isOpen)
+            {
+                helpDialog.draw(window, font);
             }
 
             // Draw resize dialog with 8-bit style
